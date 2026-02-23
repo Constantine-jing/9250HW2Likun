@@ -1,0 +1,380 @@
+---
+title: "HW2"
+author: "Mengyan Jing and Abhishek Banerjee"
+date: "2026-02-23"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Problem 1
+
+
+```{r}
+integrand <- function(t, s) {
+  # Use log-scale computation to avoid overflow/underflow
+  exp((s - 1) * log(t) - t)
+}
+
+lower_inc_gamma <- function(s, x) {
+  if (x <= 0) return(0)
+  
+  # For large x, compute as gamma(s) - upper
+  if (x > 700) {
+    return(gamma(s) - upper_inc_gamma(s, x))
+  }
+  
+  # Split: integrate from a small epsilon to x
+  # Near 0, use substitution u = t^s to remove singularity
+  # Original: integral of t^(s-1)*exp(-t) dt from 0 to x
+  # Sub u = t^s => t = u^(1/s), dt = (1/s)*u^(1/s - 1) du
+  # Integral becomes (1/s) * integral of exp(-u^(1/s)) du from 0 to x^s
+  
+  if (s < 1) {
+    # Use substitution
+    transformed_integrand <- function(u, s) {
+      (1/s) * exp(-u^(1/s))
+    }
+    result <- integrate(transformed_integrand, lower = 0, upper = x^s, s = s,
+                        rel.tol = 1e-10, subdivisions = 1000L)
+  } else {
+    result <- integrate(integrand, lower = 0, upper = x, s = s,
+                        rel.tol = 1e-10, subdivisions = 1000L)
+  }
+  return(result$value)
+}
+
+upper_inc_gamma <- function(s, x) {
+  if (x <= 0) return(gamma(s))
+  result <- integrate(integrand, lower = x, upper = Inf, s = s,
+                      rel.tol = 1e-10, subdivisions = 1000L)
+  return(result$value)
+}
+
+lower_inc_gamma_vec <- function(s_vec, x_vec) {
+  mapply(lower_inc_gamma, s_vec, x_vec)
+}
+
+upper_inc_gamma_vec <- function(s_vec, x_vec) {
+  mapply(upper_inc_gamma, s_vec, x_vec)
+}
+```
+
+```{r}
+s_vals <- seq(0.0001, 10, length.out = 100)
+x_vals <- seq(0.0001, 10000, length.out = 100)
+param_set <- expand.grid(s = s_vals, x = x_vals)
+
+# Time lower
+ptm <- proc.time()
+lower_results <- lower_inc_gamma_vec(param_set$s, param_set$x)
+proc.time() - ptm
+
+# Time upper
+ptm <- proc.time()
+upper_results <- upper_inc_gamma_vec(param_set$s, param_set$x)
+proc.time() - ptm
+
+```
+
+
+```{r}
+# Baseline from R's built-in functions
+baseline_lower <- pgamma(param_set$x, shape = param_set$s, scale = 1, 
+                          lower.tail = TRUE) * gamma(param_set$s)
+baseline_upper <- pgamma(param_set$x, shape = param_set$s, scale = 1, 
+                          lower.tail = FALSE) * gamma(param_set$s)
+
+# MSE
+mse_lower <- mean((lower_results - baseline_lower)^2)
+mse_upper <- mean((upper_results - baseline_upper)^2)
+
+cat("MSE lower:", mse_lower, "\n")
+cat("MSE upper:", mse_upper, "\n")
+
+```
+
+
+```{r}
+library(Rcpp)
+```
+
+```{r}
+Sys.which("make")
+```
+
+## Task 1
+
+```{Rcpp}
+#include <Rcpp.h>
+#include <cmath>
+using namespace Rcpp;
+
+// [[Rcpp::export]]
+NumericVector integrand_cpp(NumericVector t, double s) {
+  int n = t.size();
+  NumericVector out(n);
+  for(int i=0; i<n; i++){
+    out[i] = std::exp((s - 1.0) * std::log(t[i]) - t[i]);
+  }
+  return out;
+}
+
+// [[Rcpp::export]]
+NumericVector transformed_integrand_cpp(NumericVector u, double s) {
+  int n = u.size();
+  NumericVector out(n);
+  for(int i=0; i<n; i++){
+    out[i] = (1.0 / s) * std::exp(-std::pow(u[i], 1.0 / s));
+  }
+  return out;
+}
+```
+
+
+
+```{r}
+lower_inc_gamma_cpp <- function(s, x) {
+  if (x <= 0) return(0)
+  
+  if (x > 700) {
+    return(gamma(s) - upper_inc_gamma_cpp(s, x))
+  }
+  
+  if (s < 1) {
+    result <- integrate(function(u) transformed_integrand_cpp(u, s),
+                        lower = 0, upper = x^s,
+                        rel.tol = 1e-10, subdivisions = 1000L)
+  } else {
+    result <- integrate(function(t) integrand_cpp(t, s),
+                        lower = 0, upper = x,
+                        rel.tol = 1e-10, subdivisions = 1000L)
+  }
+  return(result$value)
+}
+
+upper_inc_gamma_cpp <- function(s, x) {
+  if (x <= 0) return(gamma(s))
+  result <- integrate(function(t) integrand_cpp(t, s),
+                      lower = x, upper = Inf,
+                      rel.tol = 1e-10, subdivisions = 1000L)
+  return(result$value)
+}
+
+lower_inc_gamma_cpp_vec <- function(s_vec, x_vec) {
+  mapply(lower_inc_gamma_cpp, s_vec, x_vec)
+}
+
+upper_inc_gamma_cpp_vec <- function(s_vec, x_vec) {
+  mapply(upper_inc_gamma_cpp, s_vec, x_vec)
+}
+```
+
+
+```{r}
+# Timing
+ptm <- proc.time()
+lower_results_cpp <- lower_inc_gamma_cpp_vec(param_set$s, param_set$x)
+proc.time() - ptm
+
+ptm <- proc.time()
+upper_results_cpp <- upper_inc_gamma_cpp_vec(param_set$s, param_set$x)
+proc.time() - ptm
+
+# MSE
+mse_lower_cpp <- mean((lower_results_cpp - baseline_lower)^2)
+mse_upper_cpp <- mean((upper_results_cpp - baseline_upper)^2)
+cat("MSE lower (C++ integrand):", mse_lower_cpp, "\n")
+cat("MSE upper (C++ integrand):", mse_upper_cpp, "\n")
+```
+
+
+## 3)
+
+```{r}
+# install.packages("statmod")
+library(statmod)
+
+gw <- gauss.quad(n = 30, kind = "legendre")
+nodes <- gw$nodes
+weights <- gw$weights
+
+nodes
+weights
+```
+
+
+```{Rcpp}
+#include <Rcpp.h>
+#include <cmath>
+#include <vector>
+using namespace Rcpp;
+
+// 30-point Gauss-Legendre nodes and weights
+void gauss_legendre_30(std::vector<double>& nodes, std::vector<double>& weights) {
+  const double x[] = {
+    0.0514718426, 0.1538699136, 0.2546369261, 0.3527047255, 0.4470337695,
+    0.5366241481, 0.6205261830, 0.6978504948, 0.7677774321, 0.8295657624,
+    0.8825605358, 0.9262000474, 0.9600218650, 0.9836681233, 0.9968934841
+  };
+  const double w[] = {
+    0.1028526529, 0.1017623897, 0.0995934206, 0.0963687372, 0.0921225222,
+    0.0868997872, 0.0807558952, 0.0737559747, 0.0659742299, 0.0574931562,
+    0.0484026728, 0.0387991926, 0.0287847079, 0.0184664683, 0.0079681925
+  };
+  nodes.resize(30);
+  weights.resize(30);
+  for (int i = 0; i < 15; i++) {
+    nodes[i]        = -x[14 - i];
+    weights[i]      =  w[14 - i];
+    nodes[15 + i]   =  x[i];
+    weights[15 + i] =  w[i];
+  }
+}
+
+static std::vector<double> gl_nodes, gl_wts;
+static bool gl_init = false;
+
+void ensure_gl() {
+  if (!gl_init) {
+    gauss_legendre_30(gl_nodes, gl_wts);
+    gl_init = true;
+  }
+}
+
+// Generic GL integration over [a,b] with n_panels
+typedef double (*integrand_fn)(double, double, double);
+
+double gl_integrate2(double a, double b, int n_panels,
+                     integrand_fn f, double p1, double p2) {
+  ensure_gl();
+  double h = (b - a) / n_panels;
+  double total = 0.0;
+  for (int p = 0; p < n_panels; p++) {
+    double mid = a + h * (p + 0.5);
+    double half_h = h * 0.5;
+    for (int i = 0; i < 30; i++) {
+      double t = mid + half_h * gl_nodes[i];
+      total += half_h * gl_wts[i] * f(t, p1, p2);
+    }
+  }
+  return total;
+}
+
+// Direct integrand: t^(s-1)*exp(-t)
+double direct_ig(double t, double s, double unused) {
+  if (t <= 0.0) return 0.0;
+  return std::exp((s - 1.0) * std::log(t) - t);
+}
+
+// Transformed for s<1: (1/s)*exp(-u^(1/s))
+double transformed_ig(double u, double s, double unused) {
+  if (u <= 0.0) return 0.0;
+  return (1.0 / s) * std::exp(-std::pow(u, 1.0 / s));
+}
+
+// ✅ NEW: stable upper integrand on v ∈ [0, Vmax], with t = x + v
+double upper_v_ig(double v, double s, double x) {
+  double t = x + v;
+  if (t <= 0.0) return 0.0;
+  return std::exp((s - 1.0) * std::log(t) - t);
+}
+
+// Panels heuristic
+int choose_panels(double range) {
+  if (range < 1.0) return 20;
+  if (range < 10.0) return 40;
+  if (range < 100.0) return 80;
+  if (range < 1000.0) return 160;
+  return 300;
+}
+
+// ✅ Scalar helpers so upper can call lower (pure C++)
+double lower_scalar(double s, double x) {
+  if (x <= 0.0) return 0.0;
+
+  if (s < 1.0) {
+    double upper_lim = std::pow(x, s);
+    int panels = choose_panels(upper_lim);
+    return gl_integrate2(1e-15, upper_lim, panels, transformed_ig, s, 0.0);
+  } else {
+    int panels = choose_panels(x);
+    return gl_integrate2(1e-15, x, panels, direct_ig, s, 0.0);
+  }
+}
+
+double upper_scalar(double s, double x) {
+  if (x <= 0.0) return R::gammafn(s);
+
+  // very large x => ~0
+  double cutoff = s + 50.0 * std::sqrt(s) + 200.0;
+  if (x > cutoff) return 0.0;
+
+  // ✅ Key fix: for x < s, use complement (avoids missing mass)
+  if (x < s + 2.0 * std::sqrt(s)) {
+    return R::gammafn(s) - lower_scalar(s, x);
+  }
+
+  // ✅ Otherwise compute upper directly, stable v-integral (no 1/u)
+  double Vmax = 60.0 + 10.0 * std::sqrt(s);   // baseline
+  if (x > 10.0) Vmax = 40.0 + 8.0 * std::sqrt(s);
+  if (x > 50.0) Vmax = 25.0 + 5.0 * std::sqrt(s);   // safe truncation
+  int panels = choose_panels(Vmax);
+  return gl_integrate2(0.0, Vmax, panels, upper_v_ig, s, x);
+}
+
+// [[Rcpp::export]]
+NumericVector lower_inc_gamma_full_cpp(NumericVector s_vec, NumericVector x_vec) {
+  int n = s_vec.size();
+  NumericVector out(n);
+
+  for (int i = 0; i < n; i++) {
+    double s = s_vec[i];
+    double x = x_vec[i];
+
+    if (x <= 0.0) { out[i] = 0.0; continue; }
+
+    // For huge x, lower = gamma(s) - upper (upper tiny)
+    if (x > 700.0) {
+      out[i] = R::gammafn(s) - upper_scalar(s, x);
+    } else {
+      out[i] = lower_scalar(s, x);
+    }
+  }
+  return out;
+}
+
+// [[Rcpp::export]]
+NumericVector upper_inc_gamma_full_cpp(NumericVector s_vec, NumericVector x_vec) {
+  int n = s_vec.size();
+  NumericVector out(n);
+
+  for (int i = 0; i < n; i++) {
+    out[i] = upper_scalar((double)s_vec[i], (double)x_vec[i]);
+  }
+  return out;
+}
+```
+
+
+
+```{r}
+# Timing
+ptm <- proc.time()
+lower_results_full <- lower_inc_gamma_full_cpp(param_set$s, param_set$x)
+proc.time() - ptm
+
+ptm <- proc.time()
+upper_results_full <- upper_inc_gamma_full_cpp(param_set$s, param_set$x)
+proc.time() - ptm
+
+# MSE
+mse_lower_full <- mean((lower_results_full - baseline_lower)^2)
+mse_upper_full <- mean((upper_results_full - baseline_upper)^2)
+cat("MSE lower (full C++):", mse_lower_full, "\n")
+cat("MSE upper (full C++):", mse_upper_full, "\n")
+```
+
+
