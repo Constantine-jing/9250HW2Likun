@@ -740,7 +740,7 @@ acf(as.numeric(OUT$runs[["1"]]$Q2$indicator),
 
 ## 3) 
 
-
+Here I am sharing all the 12 plots (6 for $\lambda=0.5$ and 6 for $\lambda=1$) needed to answer this question. For $\lambda =1$, we see that under $Q1$, the trace plot of $I_t$ shows long flat line at 1, showing that the chain becomes stuck in high-probability configurations. This is consistent with the extremely low acceptance rate (0.0002) and very very small ESS (3.4). However for $q2$, we can see that the trace plot shows continuous switching between 0 and 1, which proves that it is the space. Similar conclusion can be drawn for both for $\lambda=0.5$ For the trace of D(X), we see for $\lambda = 1$, $Q1$ quickly collapses  with very small D(X) and remains there whereas $Q2$ again explors a wider range. Similar observations can be seen for the case of $\lambda =0.5$ but with far less extreme behavior. For the autocorrelation plots, as explained before, $Q14$ shows high autocorrelation with its lagged values than $Q2$ indicating higher changes of chain being stuck. To decide on the effective sample size, we looked at the effective sample size, the 	Batch-means MCMC standard errors which we recorded in the next subpart. All these indicates that $Q2$ is a much much faster mixing MC than $Q1$, thus we are suured that $Q1$ will converge way faster than $Q1$. Here comes a trade off, running too many iterations will be useless for $Q2$ as it has possible converged way earlier and will lead to unnecessary computation time. On the other hand, if we stop as soon as $Q2$ converged, there will be a good chance that $Q1$ haven't converged at all. So a trade of can be made by looking at the mean plots (estimate vs. iteration). There if we see that $Q1$ is about to or just (kind of) convered to almost fixed estimated values and $Q2$ converges already before a few iteration, that would, we believe, an excellent place to stop. By looking at the running mean plots below, it looks like at 50000 iterations after a burn-in of 10000 looks exactly what we wanted, $Q1$ is alomst stable at running mean of $0.87$ and $Q2$ have already stabilized at $0.9$.
 
 
 
@@ -748,8 +748,55 @@ acf(as.numeric(OUT$runs[["1"]]$Q2$indicator),
 make_plots(OUT$runs[["0.5"]]$Q1, OUT$runs[["0.5"]]$Q2, main_tag="(lambda=0.5)")
 make_plots(OUT$runs[["1"]]$Q1, OUT$runs[["1"]]$Q2, main_tag="(lambda=1)")
 ```
+```{r}
+running_mean <- function(x){
+  x <- as.numeric(x)
+  cumsum(x) / seq_along(x)
+}
+
+running_mean_plots <- function(res_Q1, res_Q2, lambda){
+
+  ind1 <- as.numeric(res_Q1$indicator)
+  ind2 <- as.numeric(res_Q2$indicator)
+
+  rm1 <- running_mean(ind1)
+  rm2 <- running_mean(ind2)
+
+  par(mfrow=c(1,2), mar=c(4,4,4,1))
+
+  plot(rm1, type="l",
+       xlab="Iteration (post-burn)",
+       ylab="Running mean",
+       main=paste0("Running mean: Q1 (lambda=", lambda, ")"))
+  abline(h=mean(ind1), lty=3)
+
+  plot(rm2, type="l",
+       xlab="Iteration (post-burn)",
+       ylab="Running mean",
+       main=paste0("Running mean: Q2 (lambda=", lambda, ")"))
+  abline(h=mean(ind2), lty=3)
+}
+
+# Run for both lambdas
+running_mean_plots(OUT$runs[["0.5"]]$Q1,
+                   OUT$runs[["0.5"]]$Q2,
+                   0.5)
+
+running_mean_plots(OUT$runs[["1"]]$Q1,
+                   OUT$runs[["1"]]$Q2,
+                   1)
+```
 
 
+## 4)
+
+The following Table reports all estimates, along with associated MCMC standard errors (using consistent mini batches). 
+
+```{r}
+TAB
+```
+
+From the table above me see that, $Q1$ has 0.4619 and 0.8483 as estimates and 0.0296 and 0.02270 as standard errors for $\lambda$ at 0.5 and 1 respectively. Similarly $Q3$ has 0.7707 and 0.9190 as estimates and 0.01265 and 0.00918 as standard errors for $\lambda$ at 0.5 and 1 respectively.
 
 
 
