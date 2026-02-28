@@ -377,4 +377,103 @@ cat("MSE lower (full C++):", mse_lower_full, "\n")
 cat("MSE upper (full C++):", mse_upper_full, "\n")
 ```
 
+# Problem 3
+
+We have in the question, an exponentially tilted positive stable distribution which is very useful and flexible in modeling extreme weather. The family of such distributions is parameterized by $\theta > 0$. We have its density function as:
+$$
+f(x;\theta)
+=
+\frac{\sqrt{\frac{1}{4\pi x^{3}}}\,
+\exp\!\left(-\frac{1}{4x} - \theta x\right)}
+{\exp(-\sqrt{\theta})},
+\qquad x > 0.
+$$
+## 1)
+
+We will use Rejection Sampling technique discueesed in class for this problem. If we look at the above density and if we ignore the constant terms, we get the kernal as $$x^{-3/2} \exp\!\left(-\frac{1}{4x} - \theta x\right)$$. This kernal, at least to us, looks strikingly similar to that of the kernel of an Inverse Gaussian distribution. From wikipedia, I got the density of Inverse Gaussian distribution as $$
+f(x;\mu,\lambda)
+=
+\sqrt{\frac{\lambda}{2\pi x^{3}}}
+\exp\!\left(
+-\frac{\lambda (x-\mu)^2}{2\mu^{2}x}
+\right),
+\qquad x>0,$$ where $\mu >0$ and $\lambda > 0$ are parameters. Thus, we can use this distribution as a proposal distribution. We can use in-built R function to sample from this proposal distribution.  We use the following R code to implement the Rejection sampling with Inverse Gaussian being our proposal distribution. 
+
+```{r}
+library(statmod)   
+
+# Target density
+f_theta <- function(x, theta = 0.1){
+  ifelse(x > 0,
+         sqrt(1/(4*pi*x^3)) *
+           exp(-1/(4*x) - theta*x + sqrt(theta)),
+         0)
+}
+
+# Proposal: Inverse Gaussian
+g_prop <- function(x, theta = 0.1){
+  mu  <- 1/(2*sqrt(theta))
+  lam <- 1
+  dinvgauss(x, mean = mu, shape = lam)
+}
+
+# Rejection sampler 
+tilted_sampler <- function(theta = 0.1){
+
+  mu  <- 1/(2*sqrt(theta))
+  lam <- 1
+
+  counter <- 1
+
+  x <- rinvgauss(1, mean = mu, shape = lam)
+  ratio <- f_theta(x, theta) / g_prop(x, theta)
+
+  while(runif(1) > ratio){
+
+    x <- rinvgauss(1, mean = mu, shape = lam)
+    counter <- counter + 1
+
+    ratio <- f_theta(x, theta) / g_prop(x, theta)
+  }
+
+  return(c(x, counter))
+}
+```
+
+Now as asked in the question, we sample $N=100000$ independent samples for $\theta= 0.1$
+
+
+```{r}
+N <- 100000
+res <- sapply(1:N, function(i) tilted_sampler(0.1))
+
+samples     <- res[1,]
+num_sampled <- sum(res[2,])
+```
+
+
+## 2) 
+
+Now we replicate Figure 3 in the question; that is, plot the sample density using histogram and compare it to the underlying true density. We use the ocde given in the question:
+
+```{r}
+hist(samples, breaks = 1000, freq = FALSE,
+     border = "lightblue")
+
+curve(f_theta(x, 0.1),
+      from = 1e-5, to = 60,
+      n = 1000, add = TRUE,
+      col = "red", lty = 3)
+```
+
+We see in the above plot, there is a perfect alignment between the sample density and the analytic density. This showed that pur choice of proposal distribution was correct and the rejection sampling technique henceforth did a good job!
+
+
+
+
+
+
+
+
+
 
