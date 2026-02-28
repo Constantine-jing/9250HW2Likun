@@ -466,9 +466,288 @@ curve(f_theta(x, 0.1),
       col = "red", lty = 3)
 ```
 
-We see in the above plot, there is a perfect alignment between the sample density and the analytic density. This showed that pur choice of proposal distribution was correct and the rejection sampling technique henceforth did a good job!
+We see in the above plot, there is a perfect alignment between the sample density and the analytic density. This showed that our choice of proposal distribution was correct and the rejection sampling technique henceforth did a good job!
 
 
+
+# Problem 4 
+
+In this question we consider a 4 × 4 grid of Bernoulli random variables denoted by $X = [Xij]$. We also consider $N(X)$ as the total number of successes in X (the sum of X) and $D(X)$ as the total number of neighbors (horizontal or vertical) which differ. We are also told that if we write the elements of X out in a vector V , then there is a 24×16 matrix M such that $D(X)$ is sum of the absolute values of MV . The 24 arises because there are 24 neighbor-pairs to check (diagonal elements are not neighbors.) We have probability distribution of X being proportional to $$
+\pi(X) \propto 
+p^{N(X)} (1 - p)^{16 - N(X)} 
+\exp\!\left\{ -\lambda D(X) \right\}.$$
+Therefore, if $\lambda = 0$, we have i.i.d.\ Bernoulli entries. We use Markov chain Monte Carlo to approximate the probability that the diagonal of this matrix is all 1’s. We assume $p = 0.8$. We approximate the probabilities for each of the following cases: $\lambda = 0.5, \: \lambda = 1.$ We have $Q1$ where every transition is equally likely with probability $1/2^{16}$. That is, the next candidate state is simply 16 i.i.d. Bernoulli variables with prob- ability 0.5 of success each. We use $Q2$ such that we choose one of the 16 entries in the table with probability 1/16 and then set that entry to 0 or 1 with probability 0.5 each. We use the following R code:
+
+
+
+
+```{r}
+
+set.seed(12345678)
+
+N_fun <- function(X) sum(X)
+
+D_fun <- function(X){
+  d <- 0
+  d <- d + sum(abs(X[1:3, ] - X[2:4, ]))
+  d <- d + sum(abs(X[ ,1:3] - X[ ,2:4]))
+  d
+}
+logpi <- function(X, p=0.8, lambda=0.5){
+  n <- N_fun(X)
+  d <- D_fun(X)
+  n*log(p) + (16-n)*log(1-p) - lambda*d
+}
+diag_all1 <- function(X) all(diag(X) == 1)
+mh_Q1_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL,
+                       keep_X = FALSE){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+  lp <- logpi(X,p,lambda)
+
+  ind  <- logical(n_iter)
+  Dtr  <- numeric(n_iter)
+  acc  <- logical(n_iter)
+
+  Xpost <- if(keep_X) matrix(NA_integer_, nrow = n_iter - burn, ncol = 16) else NULL
+  k <- 0
+
+  for(t in 1:n_iter){
+    Y   <- matrix(rbinom(16,1,0.5), 4,4)
+    lpy <- logpi(Y,p,lambda)
+
+    if(log(runif(1)) < (lpy - lp)){
+      X <- Y; lp <- lpy
+      acc[t] <- TRUE
+    }
+
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+
+    if(keep_X && t > burn){
+      k <- k + 1
+      Xpost[k,] <- as.integer(c(X))
+    }
+  }
+
+  list(
+    indicator = ind[(burn+1):n_iter],
+    D_trace   = Dtr[(burn+1):n_iter],
+    acc_rate  = mean(acc),
+    n_iter    = n_iter,
+    burn      = burn,
+    p         = p,
+    lambda    = lambda,
+    chain_last = X,
+    X_post_vec = Xpost
+  )
+}
+mh_Q2_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL,
+                       keep_X = FALSE){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+  lp <- logpi(X,p,lambda)
+
+  ind  <- logical(n_iter)
+  Dtr  <- numeric(n_iter)
+  acc  <- logical(n_iter)
+
+  Xpost <- if(keep_X) matrix(NA_integer_, nrow = n_iter - burn, ncol = 16) else NULL
+  k <- 0
+  for(t in 1:n_iter){
+    Y <- X
+    j <- sample.int(16, 1)
+    Y[j] <- rbinom(1,1,0.5)
+    lpy <- logpi(Y,p,lambda)
+
+    if(log(runif(1)) < (lpy - lp)){
+      X <- Y; lp <- lpy
+      acc[t] <- TRUE
+    }
+
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+
+    if(keep_X && t > burn){
+      k <- k + 1
+      Xpost[k,] <- as.integer(c(X))
+    }
+  }
+
+  list(
+    indicator = ind[(burn+1):n_iter],
+    D_trace   = Dtr[(burn+1):n_iter],
+    acc_rate  = mean(acc),
+    n_iter    = n_iter,
+    burn      = burn,
+    p         = p,
+    lambda    = lambda,
+    chain_last = X,
+    X_post_vec = Xpost
+  )
+}
+
+
+library(coda)
+
+batch_se <- function(x, b = 200){
+  x <- as.numeric(x)
+  n <- length(x)
+  a <- floor(n / b)
+  x <- x[1:(a*b)]
+  m <- matrix(x, nrow = b)
+  bm <- colMeans(m)
+  sqrt(var(bm) / a)
+}
+
+ess <- function(x) as.numeric(effectiveSize(as.numeric(x)))
+
+make_plots <- function(res_Q1, res_Q2, main_tag=""){
+  ind1 <- as.numeric(res_Q1$indicator)
+  ind2 <- as.numeric(res_Q2$indicator)
+  D1   <- res_Q1$D_trace
+  D2   <- res_Q2$D_trace
+
+  op <- par(no.readonly=TRUE); on.exit(par(op), add=TRUE)
+  par(mfrow=c(2,3), mar=c(4,4,2,1))
+
+  plot(ind1, type="l", xlab="iter (post-burn)", ylab="I(diag all 1)",
+       main=paste0("Trace I: Q1 ", main_tag))
+  plot(ind2, type="l", xlab="iter (post-burn)", ylab="I(diag all 1)",
+       main=paste0("Trace I: Q2 ", main_tag))
+
+  plot(D1, type="l", xlab="iter (post-burn)", ylab="D(X)",
+       main=paste0("Trace D: Q1 ", main_tag))
+  plot(D2, type="l", xlab="iter (post-burn)", ylab="D(X)",
+       main=paste0("Trace D: Q2 ", main_tag))
+
+  acf(ind1, main=paste0("ACF I: Q1 ", main_tag))
+  acf(ind2, main=paste0("ACF I: Q2 ", main_tag))
+}
+
+summary_row <- function(res, algo="Q1", bsize=200){
+  ind <- as.numeric(res$indicator)
+  data.frame(
+    lambda   = res$lambda,
+    algo     = algo,
+    n_post   = length(ind),
+    acc_rate = res$acc_rate,
+    est      = mean(ind),
+    ESS      = ess(ind),
+    SE_bm    = batch_se(ind, b=bsize),
+    stringsAsFactors = FALSE
+  )
+}
+
+p <- 0.8
+lams <- c(0.5, 1.0)
+n_iter <- 60000
+burn   <- 10000
+bsize  <- 200
+
+OUT <- list(meta=list(p=p, lams=lams, n_iter=n_iter, burn=burn, bsize=bsize),
+            runs=list())
+
+for(lambda in lams){
+  OUT$runs[[as.character(lambda)]] <- list(
+    Q1 = mh_Q1_once(n_iter, burn, p, lambda, keep_X=FALSE),
+    Q2 = mh_Q2_once(n_iter, burn, p, lambda, keep_X=FALSE)
+  )
+}
+
+# ============================================================
+# TABLE for Part (4): estimates + MCMC SE + ESS + acc rate
+# ============================================================
+
+TAB <- do.call(rbind, lapply(lams, function(lambda){
+  r <- OUT$runs[[as.character(lambda)]]
+  rbind(summary_row(r$Q1, "Q1", bsize),
+        summary_row(r$Q2, "Q2", bsize))
+}))
+print(TAB)
+
+# ============================================================
+# FIGURES for Part (2)-(3): make representative plots
+# (call these when writing up; chains already stored in OUT)
+# ============================================================
+
+# Example: plots for lambda=0.5
+make_plots(OUT$runs[["0.5"]]$Q1, OUT$runs[["0.5"]]$Q2, main_tag="(lambda=0.5)")
+
+# Example: plots for lambda=1
+make_plots(OUT$runs[["1"]]$Q1, OUT$runs[["1"]]$Q2, main_tag="(lambda=1)")
+```
+
+We use the \textbf{Metropolis--Hastings (MH)} algorithm to approximate
+$\Pr(\text{diag}(X) = \mathbf{1})$ under the distribution, as given in the question,
+\[
+\pi(X) \;\propto\;
+p^{N(X)}\,(1-p)^{16-N(X)}\,\exp\!\bigl\{-\lambda\, D(X)\bigr\},
+\]
+with $p = 0.8$ and $\lambda \in \{0.5,\; 1.0\}$. We initialised the chain by drawing each of the 16 entries of the $4\times 4$ matrix $X^{(0)}$ independently from $\text{Bernoulli}(0.5)$. Each chain is run for $T = 60000$ iterations and we considered $10000$ as burn-in which we left out. After discarding the burnin-in, for the next $50000$ iterations we estimate the targer probability as, \[
+    \widehat{P} \;=\; \frac{1}{T - T_{\text{burn}}}
+    \sum_{t=T_{\text{burn}}+1}^{T} \mathbf{1}\!\bigl[\text{diag}(X^{(t)}) = \mathbf{1}\bigr].
+    \]
+Now for $Q1$, at each iteration the candidate $Y$ is generated by drawing all 16 entries independently from $\text{Bernoulli}(0.5)$, so we can write
+\[
+q_1(Y \mid X) \;=\; \prod_{i,j=1}^{4} \left(\tfrac{1}{2}\right) \;=\; \frac{1}{2^{16}}.
+\]
+ We set a seed at `12345678` for reproducibility. As becuase $q_1(Y\mid X) = q_1(X\mid Y)$, the proposal is symmetric we can actually simplify the MH acceptance probability to 
+\[
+\alpha(X, Y) \;=\; \min\!\left(1,\; \frac{\pi(Y)}{\pi(X)}\right).
+\]
+In our R code we worked on the log scale, so we accept $Y$ if $\log U < \log\pi(Y) - \log\pi(X)$, such that $U \sim \text{Uniform}(0,1)$.
+
+Now for $Q2$, we have at each iterations one of the 16 entries being selected uniformly at random (with probability $1/16$) and set it to 0 or 1 with equal probability $1/2$, leaving all other entries totally unchanged. Foe example, if entry $(i,j)$ is chosen,
+\[
+Y_{kl} =
+\begin{cases}
+\text{Bernoulli}(0.5), & (k,l) = (i,j),\\
+X_{kl}, & (k,l) \neq (i,j).
+\end{cases}
+\]
+We note that even this is a symmetric proposal as the probability of choosing entry $(i,j)$ and setting it to a particular value is the same in both directions, so the acceptance probability again can be reduced to
+\[
+\alpha(X, Y) \;=\; \min\!\left(1,\; \frac{\pi(Y)}{\pi(X)}\right).
+\]
+
+## 2) 
+
+From the table below, it is evident that the second algorithm , namely $Q2$ has a much faster mixing Markov Chain. We see that for that, for 60000 iterations with 10000 burn-ins, the effective sample size for $Q1$ is 51.6 whereas for $Q2$ its 970.8 for $\lambda=0.5$ and for $\lambda = 1$ we wet the effective samples sizes for $Q1$ and $Q2$ as 3.4 and 795.1 respective;y. The acceptance rate for $Q1$ is 0.008 and 0.0002 for $\lambda = 0.5,1$ respectively. For $Q2$, on the other hand has a much much higher acceptance rate of $0.6$ and $0.5$ for $\lambda = 0.5,1$ respectively. This shows that $Q1$ almost never accepts, especially for $\lambda =1$ making the chain extremely difficult to move. Further proof can be obtained by looking at the MCMC standard errors which are lower for $Q2$ (0.012 and 0.009 for the two $\lambda$ values in the respective orders) than $Q1$ (0.029 and 0.022 for the two $\lambda$ values in the respective orders). 
+
+
+```{r}
+TAB
+```
+To make our point more convincing, we can look at the ACF plots below. The first two ACF plots are for $\lambda =0.5$, precisely, first one for $Q1$ and the second for $Q2$. The next two are for $\lambda =1$ in the same order. We see that $Q1$ for both lamda values have high autocorrelation with its past values whereas for $Q2$ it decreases with increasing lags, this shows that for $Q1$ the chains will get stuck and will decay much more than in $Q2$ making it way faster.  
+
+
+
+```{r}
+par(mfrow = c(2,2), mar = c(4,4,4,1))
+
+acf(as.numeric(OUT$runs[["0.5"]]$Q1$indicator),
+    main = "ACF: Q1 (lambda = 0.5)")
+
+acf(as.numeric(OUT$runs[["0.5"]]$Q2$indicator),
+    main = "ACF: Q2 (lambda = 0.5)")
+
+acf(as.numeric(OUT$runs[["1"]]$Q1$indicator),
+    main = "ACF: Q1 (lambda = 1)")
+
+acf(as.numeric(OUT$runs[["1"]]$Q2$indicator),
+    main = "ACF: Q2 (lambda = 1)")
+```
+
+
+## 3) 
+
+
+
+
+
+```{r}
+make_plots(OUT$runs[["0.5"]]$Q1, OUT$runs[["0.5"]]$Q2, main_tag="(lambda=0.5)")
+make_plots(OUT$runs[["1"]]$Q1, OUT$runs[["1"]]$Q2, main_tag="(lambda=1)")
+```
 
 
 
