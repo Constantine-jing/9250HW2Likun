@@ -653,27 +653,19 @@ for(lambda in lams){
   )
 }
 
-# ============================================================
-# TABLE for Part (4): estimates + MCMC SE + ESS + acc rate
-# ============================================================
 
 TAB <- do.call(rbind, lapply(lams, function(lambda){
   r <- OUT$runs[[as.character(lambda)]]
   rbind(summary_row(r$Q1, "Q1", bsize),
         summary_row(r$Q2, "Q2", bsize))
 }))
-print(TAB)
+#print(TAB)
 
-# ============================================================
-# FIGURES for Part (2)-(3): make representative plots
-# (call these when writing up; chains already stored in OUT)
-# ============================================================
 
-# Example: plots for lambda=0.5
-make_plots(OUT$runs[["0.5"]]$Q1, OUT$runs[["0.5"]]$Q2, main_tag="(lambda=0.5)")
+#make_plots(OUT$runs[["0.5"]]$Q1, OUT$runs[["0.5"]]$Q2, main_tag="(lambda=0.5)")
 
-# Example: plots for lambda=1
-make_plots(OUT$runs[["1"]]$Q1, OUT$runs[["1"]]$Q2, main_tag="(lambda=1)")
+
+#make_plots(OUT$runs[["1"]]$Q1, OUT$runs[["1"]]$Q2, main_tag="(lambda=1)")
 ```
 
 We use the \textbf{Metropolis--Hastings (MH)} algorithm to approximate
@@ -799,7 +791,207 @@ TAB
 From the table above me see that, $Q1$ has 0.4619 and 0.8483 as estimates and 0.0296 and 0.02270 as standard errors for $\lambda$ at 0.5 and 1 respectively. Similarly $Q3$ has 0.7707 and 0.9190 as estimates and 0.01265 and 0.00918 as standard errors for $\lambda$ at 0.5 and 1 respectively.
 
 
+## 5)
+
+In Lecture 10, we have Monte Carlo Methods, there we are interested in estimating expectations of the form
+
+$$\mu_g = \mathbb{E}_{\pi}[g(X)] = \int g(x)\,\pi(x)\,dx,$$
+
+where $\pi$ is the target distribution. There we assumed that we can simulate draws from $\pi$. After that we can use Monte Carlo estimator $$\hat{\mu}_n = \frac{1}{n} \sum_{i=1}^n g(X_i),
+\quad X_i \stackrel{iid}{\sim} \pi.$$
+
+Now, we already know from Strong Law of Large Numbers, if $E_\pi|g(X)| < \infty$, then
+$\hat{\mu}_n \xrightarrow{a.s.} \mu_g.$ From this, we get in the slides, the Central Limit Theorem which says, if $\tau^2 = \mathrm{Var}_\pi(g(X)) < \infty,$ then $\sqrt{n}(\hat{\mu}_n - \mu_g) \xrightarrow{d} N(0,\tau^2).$ This justifies the use of Monte Carlo estimation in the iid setting. However, in this problem we cannot directly sample iid from $\pi$ so we cannot actually get $\hat \mu_n$. To find a solution for this problem, we use Markov Chain with with Metropolis-Hasting algorithm with $\pi$ being the stationary distribution. There, as also described in slides, we construct Markov chain of $\pi$ as its stationary distribution, and take $n$ chain states as though they are draws from$ \pi$. Then we take averages again. We know, also written as a result in slides, that this method relies on Law of Large Numbers for Markov chains and the conditions are easily
+satisfied. Thus, now we can actually get $\hat \mu_n$. Thus from discussion in class and slides given to us for Lecture 10, we can justify the use of the Markov chains we constructed above for estimating expectations with respect to $\pi$. 
 
 
+
+## 6)
+
+Now we make an attempt to construct a more efficient Metropolis-Hastings algorithm than the ones we have used above. We know A Gibbs Sampler is a special case of Metropolis Hasting algorithm with acceptance probability 1 since the proposal equals the full conditional. So the the idea is to use a Gibbs sampler ($Q3$) which would randomly visit all 16 cells, this should be more useful than $Q1$ and $Q2$. Here we sample $X_j$ for each cell $j$ from its full conditional distribution under $\pi$. 
+
+
+$$
+P(X_j = 1 \mid X_{-j}) = \frac{\pi(X \text{ with } X_j=1)}{\pi(X \text{ with } X_j=1) + \pi(X \text{ with } X_j=0)}
+$$
+
+Here we compute $\log\pi$ for both cases and use the softmax.
+
+
+
+The following code implemends the Gibbs sampler and prepares a table that compares acceptance rate, batch Standard Error, etc. for the three. Here we compute $\log\pi$ for both cases ($P(X_j = 1 \mid X_{-j})$ and $P(X_j = 0 \mid X_{-j})$) and use the softmax operator.  As given in question, we only consider the case when $\lambda = 1.$
+
+
+
+
+
+```{r}
+set.seed(12345678)
+N_fun <- function(X) sum(X)
+D_fun <- function(X){
+  sum(abs(X[1:3, ] - X[2:4, ])) + sum(abs(X[ ,1:3] - X[ ,2:4]))
+}
+logpi <- function(X, p=0.8, lambda=0.5){
+  n <- N_fun(X)
+  d <- D_fun(X)
+  n*log(p) + (16-n)*log(1-p) - lambda*d
+}
+diag_all1 <- function(X) all(diag(X) == 1)
+gibbs_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+
+  ind <- logical(n_iter)
+  Dtr <- numeric(n_iter)
+
+  for(t in 1:n_iter){
+    perm <- sample.int(16)
+    for(j in perm){
+      X1 <- X; X1[j] <- 1
+      X0tmp <- X; X0tmp[j] <- 0
+
+      lp1 <- logpi(X1, p, lambda)
+      lp0 <- logpi(X0tmp, p, lambda)
+
+      prob1 <- 1 / (1 + exp(lp0 - lp1))
+      X[j] <- rbinom(1, 1, prob1)
+    }
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+  }
+
+  list(
+    indicator  = ind[(burn+1):n_iter],
+    D_trace    = Dtr[(burn+1):n_iter],
+    acc_rate   = 1.0,
+    n_iter     = n_iter,
+    burn       = burn,
+    p          = p,
+    lambda     = lambda,
+    chain_last = X
+  )
+}
+mh_Q1_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+  lp <- logpi(X,p,lambda)
+
+  ind <- logical(n_iter)
+  Dtr <- numeric(n_iter)
+  acc <- logical(n_iter)
+
+  for(t in 1:n_iter){
+    Y   <- matrix(rbinom(16,1,0.5), 4,4)
+    lpy <- logpi(Y,p,lambda)
+    if(log(runif(1)) < (lpy - lp)){
+      X <- Y; lp <- lpy; acc[t] <- TRUE
+    }
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+  }
+
+  list(
+    indicator  = ind[(burn+1):n_iter],
+    D_trace    = Dtr[(burn+1):n_iter],
+    acc_rate   = mean(acc),
+    n_iter     = n_iter,
+    burn       = burn,
+    p          = p,
+    lambda     = lambda,
+    chain_last = X
+  )
+}
+mh_Q2_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+  lp <- logpi(X,p,lambda)
+
+  ind <- logical(n_iter)
+  Dtr <- numeric(n_iter)
+  acc <- logical(n_iter)
+
+  for(t in 1:n_iter){
+    Y <- X
+    j <- sample.int(16, 1)
+    Y[j] <- rbinom(1,1,0.5)
+
+    lpy <- logpi(Y,p,lambda)
+    if(log(runif(1)) < (lpy - lp)){
+      X <- Y; lp <- lpy; acc[t] <- TRUE
+    }
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+  }
+
+  list(
+    indicator  = ind[(burn+1):n_iter],
+    D_trace    = Dtr[(burn+1):n_iter],
+    acc_rate   = mean(acc),
+    n_iter     = n_iter,
+    burn       = burn,
+    p          = p,
+    lambda     = lambda,
+    chain_last = X
+  )
+}
+batch_se <- function(x, b = 200){
+  x <- as.numeric(x)
+  a <- floor(length(x) / b)
+  x <- x[1:(a*b)]
+  m <- matrix(x, nrow = b)
+  bm <- colMeans(m)
+  sqrt(var(bm) / a)
+}
+ess <- function(x) as.numeric(effectiveSize(as.numeric(x)))
+summary_row <- function(res, algo="Q1", bsize=200){
+  ind <- as.numeric(res$indicator)
+  data.frame(
+    lambda   = res$lambda,
+    algo     = algo,
+    n_post   = length(ind),
+    acc_rate = round(res$acc_rate, 6),
+    est      = round(mean(ind), 6),
+    ESS      = round(ess(ind), 2),
+    SE_bm    = round(batch_se(ind, b=bsize), 6),
+    check.names = FALSE
+  )
+}
+lambda <- 1.0
+p <- 0.8
+n_iter <- 60000
+burn <- 10000
+res_Q1 <- mh_Q1_once(n_iter, burn, p, lambda)
+res_Q2 <- mh_Q2_once(n_iter, burn, p, lambda)
+res_Q3 <- gibbs_once(n_iter, burn, p, lambda)
+TAB <- rbind(
+  summary_row(res_Q1, "Q1"),
+  summary_row(res_Q2, "Q2"),
+  summary_row(res_Q3, "Gibbs")
+)
+TAB
+```
+
+
+We see from the above table that, naturally Gibbs sample has acceptance probability 1. We see that the batch SE is much lower for the Gibbs ($Q3$) than for $Q1$ and $Q2$. Also effective sample size (ESS) is way larger for $Q3$ than $Q1$ and $Q2$. These proves $Q3$ having much faster mixing MC and is way efficient. 
+
+```{r}
+par(mfrow=c(3,2), mar=c(4,4,3,1))
+
+plot(as.numeric(res_Q1$indicator), type="l",
+     xlab="iter (post-burn)", ylab="I(diag all 1)",
+     main="Trace I: Q1 (lambda=1)")
+acf(as.numeric(res_Q1$indicator), main="ACF I: Q1 (lambda=1)")
+
+plot(as.numeric(res_Q2$indicator), type="l",
+     xlab="iter (post-burn)", ylab="I(diag all 1)",
+     main="Trace I: Q2 (lambda=1)")
+acf(as.numeric(res_Q2$indicator), main="ACF I: Q2 (lambda=1)")
+
+plot(as.numeric(res_Q3$indicator), type="l",
+     xlab="iter (post-burn)", ylab="I(diag all 1)",
+     main="Trace I: Gibbs (lambda=1)")
+acf(as.numeric(res_Q3$indicator), main="ACF I: Gibbs (lambda=1)")
+
+par(mfrow=c(1,1))
+```
+
+We see from the above plopts that the Gibbs sampler's Trace plot is completely back showing that it covers the entire state space (that was natural from the construction). Also, it is no autocorrelation with its lags which proves that the chain would almost never get stuck at a state for the Gibbs sampler. On the contrary for $Q1$ and $Q2$ there are considerable autocorrelation with its lags which can prove chain being stuck for a prolonged time. Thus, from the table and from these plots, we can say that our proposed algorithm $Q3$ is way more efficient than $Q1$ and $Q2$. 
 
 
