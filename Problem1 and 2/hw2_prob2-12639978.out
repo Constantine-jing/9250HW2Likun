@@ -1,0 +1,58 @@
+/var/spool/slurm/slurmd/job12639978/slurm_script: line 10: cd: /home/mjd4d/hw2: No such file or directory
+=== HW2 Problem 2: 2-dim Numerical Integration ===
+Running on: c135.mgmt.hellbender 
+Date: 2026-03-02 21:20:14.759831 
+
+C++ functions compiled successfully.
+
+=== Task 1: Verify F*(x) is a valid CDF ===
+Parameters: phi = 0.7, tau = 2
+
+(1) Range check: 0 <= F*(x) <= 1
+    min(F*): 0 
+    max(F*): 0.9992996 
+    All in [0,1]? TRUE 
+
+(2) Non-decreasing check:
+    min(diff): 0 
+    Any decrease > 1e-10? FALSE 
+
+(3) Limit checks:
+    F*(1e-10) = 0  (should -> 0)
+    F*(1e-8)  = 0 
+    F*(1e-6)  = 0 
+    F*(1e4)   = 0.9825833 
+    F*(1e5)   = 0.9964627 
+    F*(1e6)   = 0.9992996 
+    F*(1e8)   = 0.9999734  (should -> 1)
+
+Negative s check (s = 0.5 - 0.7 = -0.2):
+  Gamma(-0.2, 1.0) = 0.2011555 
+  Gamma(-0.2, 5.0) = 0.0008079008 
+
+null device 
+          1 
+Saved: hw2_prob2_task1_CDF_check.pdf
+
+=== Task 2: Convolution CDF F_Y(y) ===
+
+--- (phi, tau, sigma) = (0.3, 2, 3) ---
+Wall-clock time (4000 points): 3.501 sec
+--- (phi, tau, sigma) = (0.7, 2, 3) ---
+Wall-clock time (4000 points): 6.76 sec
+
+null device 
+          1 
+Saved: hw2_prob2_task2_FY_CDF.pdf
+
+=== Monotonicity checks on F_Y ===
+phi=0.3, y in [-100,100]:  min(diff) = 0 
+phi=0.3, y in [1e3, 1e4]:  min(diff) = 1.54205e-06 
+phi=0.7, y in [-100,100]:  min(diff) = 0 
+phi=0.7, y in [1e3, 1e4]:  min(diff) = 5.361636e-06 
+
+=== Runtime Summary ===
+(phi=0.3):  3.501 sec for 4000 F_Y evaluations
+(phi=0.7):  6.76 sec for 4000 F_Y evaluations
+
+Done!

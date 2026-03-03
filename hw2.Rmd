@@ -275,7 +275,7 @@ double transformed_ig(double u, double s, double unused) {
   return (1.0 / s) * std::exp(-std::pow(u, 1.0 / s));
 }
 
-// ✅ NEW: stable upper integrand on v ∈ [0, Vmax], with t = x + v
+// NEW: stable upper integrand on v ∈ [0, Vmax], with t = x + v
 double upper_v_ig(double v, double s, double x) {
   double t = x + v;
   if (t <= 0.0) return 0.0;
@@ -291,7 +291,7 @@ int choose_panels(double range) {
   return 300;
 }
 
-// ✅ Scalar helpers so upper can call lower (pure C++)
+//
 double lower_scalar(double s, double x) {
   if (x <= 0.0) return 0.0;
 
@@ -312,12 +312,12 @@ double upper_scalar(double s, double x) {
   double cutoff = s + 50.0 * std::sqrt(s) + 200.0;
   if (x > cutoff) return 0.0;
 
-  // ✅ Key fix: for x < s, use complement (avoids missing mass)
+  // Key fix: for x < s, use complement (avoids missing mass)
   if (x < s + 2.0 * std::sqrt(s)) {
     return R::gammafn(s) - lower_scalar(s, x);
   }
 
-  // ✅ Otherwise compute upper directly, stable v-integral (no 1/u)
+  // Otherwise compute upper directly, stable v-integral (no 1/u)
   double Vmax = 60.0 + 10.0 * std::sqrt(s);   // baseline
   if (x > 10.0) Vmax = 40.0 + 8.0 * std::sqrt(s);
   if (x > 50.0) Vmax = 25.0 + 5.0 * std::sqrt(s);   // safe truncation

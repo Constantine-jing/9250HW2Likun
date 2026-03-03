@@ -1,0 +1,57 @@
+/var/spool/slurm/slurmd/job12639965/slurm_script: line 10: cd: /home/mjd4d/hw2: No such file or directory
+=== HW2 Problem 1: Incomplete Gamma Functions ===
+Running on: c135.mgmt.hellbender 
+Date: 2026-03-02 21:14:26.92281 
+
+=== Sanity Checks ===
+γ(1,1):  R = 0.6321206  C++ = 0.6321206  Expected = 0.6321206 
+Γ(1,1):  R = 0.3678794  C++ = 0.3678794  Expected = 0.3678794 
+γ(0.5,2): R = 1.691807  C++ = 1.691807  Expected = 1.691807 
+
+--- Edge case checks (these caused timeout before) ---
+γ(0.0001, 0.0001): C++ = 9990.794  Baseline = 9990.794 
+γ(0.0001, 30):     C++ = 10000.22  Baseline = 9999.423 
+γ(10, 30):         C++ = 362877.4  Baseline = 362877.4 
+
+=== Task 1: Timing (10,000 pairs) ===
+
+Running Method 1 (Pure R)...
+Method 1 (Pure R):
+  Lower γ(s,x): 0.688 sec
+  Upper Γ(s,x): 0.649 sec
+
+Running Method 2 (Rcpp integrand + R integrate)...
+Method 2 (Rcpp integrand + R integrate):
+  Lower γ(s,x): 0.667 sec
+  Upper Γ(s,x): 0.671 sec
+
+Running Method 3 (Full C++)...
+Method 3 (Full C++ Bonus):
+  Lower γ(s,x): 0.18 sec
+  Upper Γ(s,x): 0.183 sec
+
+=== Task 2: Baseline Comparison ===
+
+Baseline (pgamma * gamma):
+  Lower: 0.005 sec
+  Upper: 0.005 sec
+
+--- MSE vs Baseline ---
+Method 1 (Pure R):
+  Lower MSE: 9.004583e-21 
+  Upper MSE: 4.351766e-21 
+Method 2 (Rcpp integrand):
+  Lower MSE: 9.195811e-21 
+  Upper MSE: 4.401472e-21 
+Method 3 (Full C++):
+  Lower MSE: 0.006180505 
+  Upper MSE: 0.006180505 
+
+=== Summary Table ===
+                       Method Lower_sec Upper_sec
+                       Pure R     0.688     0.649
+ Rcpp integrand + R integrate     0.667     0.671
+             Full C++ (Bonus)     0.180     0.183
+          R Baseline (pgamma)     0.005     0.005
+
+Done!

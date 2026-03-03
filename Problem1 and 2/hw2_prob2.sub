@@ -1,0 +1,12 @@
+#!/bin/bash
+#SBATCH --job-name=hw2_prob2
+#SBATCH --ntasks=1
+#SBATCH --mem=64G
+#SBATCH --time=0-08:00:00
+#SBATCH --out=hw2_prob2-%j.out
+
+module load r/4.4.0
+
+cd ~/hw2
+
+Rscript hw2_problem2_run.R
