@@ -1,0 +1,1575 @@
+---
+title: "HW2"
+author: "Mengyan Jing and Abhishek Banerjee"
+date: "2026-02-23"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 6, fig.height = 4,
+                      out.width = "90%", crop = NULL)
+```
+
+
+# Problem 1
+
+We implement the lower and upper incomplete gamma functions:
+$$\gamma(s, x) = \int_0^x t^{s-1} e^{-t}\,dt, \qquad \Gamma(s, x) = \int_x^\infty t^{s-1} e^{-t}\,dt.$$
+Both are improper integrals. The lower integral has an integrable singularity at $t = 0$ when $s < 1$ (since $t^{s-1} \to \infty$), and the upper integral extends to infinity.
+
+## 1)
+
+We define the integrand $f(t; s) = t^{s-1} e^{-t}$ in R and use `integrate()` for numerical integration. The functions are vectorized over $(s, x)$ pairs using `mapply()`.
+
+```{r part1-r}
+gamma_integrand <- function(t, s) {
+  t^(s - 1) * exp(-t)
+}
+
+lower_gamma_r <- function(s, x) {
+  mapply(function(si, xi) {
+    if (xi <= 0) return(0)
+    tryCatch(
+      integrate(gamma_integrand, lower = 0, upper = xi, s = si,
+                rel.tol = 1e-10, abs.tol = 1e-14,
+                subdivisions = 500L)$value,
+      error = function(e) NA_real_
+    )
+  }, s, x)
+}
+
+upper_gamma_r <- function(s, x) {
+  mapply(function(si, xi) {
+    if (xi <= 0) return(gamma(si))
+    tryCatch(
+      integrate(gamma_integrand, lower = xi, upper = Inf, s = si,
+                rel.tol = 1e-10, abs.tol = 1e-14,
+                subdivisions = 500L)$value,
+      error = function(e) {
+        gamma(si) - lower_gamma_r(si, xi)
+      }
+    )
+  }, s, x)
+}
+```
+
+For the lower integral, `integrate()` handles the singularity at $t = 0$ via its internal adaptive subdivision. For the upper integral, R's `integrate()` supports `Inf` as an upper limit through an internal variable transformation. If this fails, we fall back to $\Gamma(s, x) = \Gamma(s) - \gamma(s, x)$.
+
+## 2)
+
+We define the same integrand in C++ via `Rcpp::cppFunction()`. The integrand uses log-space computation $\exp\bigl((s-1)\log t - t\bigr)$ instead of $t^{s-1} e^{-t}$ for improved numerical stability when $s$ is very small. The integration is still performed by R's `integrate()`.
+
+```{r part2-rcpp}
+library(Rcpp)  
+cppFunction('
+NumericVector gamma_integrand_cpp(NumericVector t, double s) {
+  int n = t.size();
+  NumericVector result(n);
+  for (int i = 0; i < n; i++) {
+    if (t[i] <= 0.0) {
+      result[i] = (s >= 1.0) ? 0.0 : R_PosInf;
+    } else {
+      result[i] = exp((s - 1.0) * log(t[i]) - t[i]);
+    }
+  }
+  return result;
+}
+')
+
+lower_gamma_rcpp <- function(s, x) {
+  mapply(function(si, xi) {
+    if (xi <= 0) return(0)
+    f <- function(t) gamma_integrand_cpp(t, si)
+    tryCatch(
+      integrate(f, lower = 0, upper = xi,
+                rel.tol = 1e-10, abs.tol = 1e-14,
+                subdivisions = 500L)$value,
+      error = function(e) NA_real_
+    )
+  }, s, x)
+}
+
+upper_gamma_rcpp <- function(s, x) {
+  mapply(function(si, xi) {
+    if (xi <= 0) return(gamma(si))
+    f <- function(t) gamma_integrand_cpp(t, si)
+    tryCatch(
+      integrate(f, lower = xi, upper = Inf,
+                rel.tol = 1e-10, abs.tol = 1e-14,
+                subdivisions = 500L)$value,
+      error = function(e) {
+        gamma(si) - lower_gamma_rcpp(si, xi)
+      }
+    )
+  }, s, x)
+}
+```
+
+## 3)
+
+We implement adaptive Gauss--Legendre 15-point quadrature entirely in C++ via `Rcpp::sourceCpp()`.
+
+**Gauss--Legendre quadrature** approximates $\int_{-1}^{1} f(t)\,dt \approx \sum_{i=1}^{n} w_i f(t_i)$, where the nodes $t_i$ are roots of the $n$-th Legendre polynomial and the weights $w_i$ are chosen so the formula is exact for polynomials of degree $\leq 2n - 1$. With $n = 15$, the rule is exact for polynomials up to degree 29. These nodes and weights are standard mathematical constants (Abramowitz \& Stegun, Table 25.4). To integrate over $[a, b]$, we apply the linear transformation $t = \frac{a+b}{2} + \frac{b-a}{2}u$, $u \in [-1,1]$.
+
+For accuracy, we wrap this in an **adaptive bisection scheme**: if the estimate on $[a, b]$ differs from the sum of estimates on $[a, m]$ and $[m, b]$ by more than a relative tolerance, we recurse (up to depth 25).
+
+**Singularity handling for $s < 1$:** The integrand $t^{s-1}e^{-t} \to \infty$ as $t \to 0$. We apply the substitution $u = t^s$, giving $t = u^{1/s}$, $dt = \frac{1}{s} u^{1/s - 1}\,du$. The integral becomes:
+$$\int_0^x t^{s-1}e^{-t}\,dt = \int_0^{x^s} \frac{1}{s}\,e^{-u^{1/s}}\,du,$$
+which is bounded and smooth on $[0, x^s]$. To avoid domain compression for very small $s$ (e.g., $s = 0.0001$ maps $[0, 30]$ to $[0, 30^{0.0001}] \approx [0, 1.0003]$), we split: apply the substitution only on $[0, \min(1, x)]$ and use direct quadrature on $[\min(1, x), x]$.
+
+For **large $x$** (where $x > \max(50, s + 10\sqrt{s})$), we have $\gamma(s, x) \approx \Gamma(s)$ since the tail is negligible, so we compute $\gamma(s, x) = \Gamma(s) - \int_x^{x+\text{tail}} t^{s-1}e^{-t}\,dt$.
+
+```{r part3-cpp, cache=FALSE}
+sourceCpp(code = '
+#include <Rcpp.h>
+#include <cmath>
+using namespace Rcpp;
+
+static const int GL_N = 15;
+static const double gl_nodes[15] = {
+  -0.987992518020485, -0.937273392400706, -0.848206583410427,
+  -0.724417731360170, -0.570972172608539, -0.394151347077563,
+  -0.201194093997435,  0.000000000000000,  0.201194093997435,
+   0.394151347077563,  0.570972172608539,  0.724417731360170,
+   0.848206583410427,  0.937273392400706,  0.987992518020485
+};
+static const double gl_weights[15] = {
+   0.030753241996117,  0.070366047488108,  0.107159220467172,
+   0.139570677926154,  0.166269205816994,  0.186161000015562,
+   0.198431485327111,  0.202578241925561,  0.198431485327111,
+   0.186161000015562,  0.166269205816994,  0.139570677926154,
+   0.107159220467172,  0.070366047488108,  0.030753241996117
+};
+
+inline double integrand(double t, double s) {
+  if (t <= 0.0) return 0.0;
+  return exp((s - 1.0) * log(t) - t);
+}
+
+inline double integrand_transformed(double u, double s) {
+  if (u <= 0.0) return 0.0;
+  double inv_s = 1.0 / s;
+  return inv_s * exp(-pow(u, inv_s));
+}
+
+typedef double (*integrand_fn)(double, double);
+
+double gl_quad(double a, double b, double s, integrand_fn f) {
+  double mid = 0.5 * (a + b);
+  double half = 0.5 * (b - a);
+  double sum = 0.0;
+  for (int i = 0; i < GL_N; i++) {
+    double t = mid + half * gl_nodes[i];
+    sum += gl_weights[i] * f(t, s);
+  }
+  return half * sum;
+}
+
+double adaptive_quad(double a, double b, double s, integrand_fn f,
+                     double tol, int depth) {
+  double whole = gl_quad(a, b, s, f);
+  double mid_pt = 0.5 * (a + b);
+  double left_val = gl_quad(a, mid_pt, s, f);
+  double right_val = gl_quad(mid_pt, b, s, f);
+  double refined = left_val + right_val;
+  double err = fabs(refined - whole);
+  if (err < tol * (1.0 + fabs(refined)) || depth >= 25) {
+    return refined;
+  }
+  return adaptive_quad(a, mid_pt, s, f, tol, depth + 1) +
+         adaptive_quad(mid_pt, b, s, f, tol, depth + 1);
+}
+
+double lower_gamma_single(double s, double x) {
+  if (x <= 0.0) return 0.0;
+  if (s > 0.0 && x > std::max(50.0, s + 10.0 * sqrt(s))) {
+    double tail_len = std::max(50.0, 4.0 * sqrt(s > 1.0 ? s : 1.0));
+    double upper_tail = adaptive_quad(x, x + tail_len, s, integrand, 1e-10, 0);
+    return R::gammafn(s) - upper_tail;
+  }
+  if (s < 1.0) {
+    double split = std::min(1.0, x);
+    double upper_u = pow(split, s);
+    double part1 = adaptive_quad(0.0, upper_u, s, integrand_transformed, 1e-10, 0);
+    double part2 = 0.0;
+    if (x > split) {
+      part2 = adaptive_quad(split, x, s, integrand, 1e-10, 0);
+    }
+    return part1 + part2;
+  } else {
+    return adaptive_quad(0.0, x, s, integrand, 1e-10, 0);
+  }
+}
+
+double upper_gamma_single(double s, double x) {
+  if (x <= 0.0) return R::gammafn(s);
+  return R::gammafn(s) - lower_gamma_single(s, x);
+}
+
+// [[Rcpp::export]]
+NumericVector lower_gamma_cpp(NumericVector s, NumericVector x) {
+  int n = s.size();
+  NumericVector result(n);
+  for (int i = 0; i < n; i++) result[i] = lower_gamma_single(s[i], x[i]);
+  return result;
+}
+
+// [[Rcpp::export]]
+NumericVector upper_gamma_cpp(NumericVector s, NumericVector x) {
+  int n = s.size();
+  NumericVector result(n);
+  for (int i = 0; i < n; i++) result[i] = upper_gamma_single(s[i], x[i]);
+  return result;
+}
+')
+```
+
+## Sanity checks
+
+We verify all three implementations agree on known values.
+
+```{r sanity}
+cat("gamma(1,1):", lower_gamma_r(1,1), "(R),",
+    lower_gamma_rcpp(1,1), "(Rcpp),",
+    lower_gamma_cpp(1,1), "(C++),",
+    "Expected:", 1 - exp(-1), "\n")
+cat("Gamma(1,1):", upper_gamma_r(1,1), "(R),",
+    upper_gamma_cpp(1,1), "(C++),",
+    "Expected:", exp(-1), "\n")
+cat("gamma(0.5,2):", lower_gamma_cpp(0.5,2),
+    "Expected:", pgamma(2, 0.5, 1, lower.tail = TRUE) * gamma(0.5), "\n")
+```
+
+All implementations produce identical results to machine precision.
+
+## Task 1: Timing over 10,000 $(s, x)$ pairs
+
+```{r timing-grid}
+s_vals <- seq(0.0001, 10, length.out = 100)
+x_vals <- seq(0.0001, 30, length.out = 100)
+param_set <- expand.grid(s = s_vals, x = x_vals)
+s_vec <- param_set$s
+x_vec <- param_set$x
+```
+
+```{r timing-methods}
+# Method 1: Pure R
+ptm <- proc.time()
+lower_r_results <- lower_gamma_r(s_vec, x_vec)
+time_lower_r <- (proc.time() - ptm)[3]
+ptm <- proc.time()
+upper_r_results <- upper_gamma_r(s_vec, x_vec)
+time_upper_r <- (proc.time() - ptm)[3]
+
+# Method 2: Rcpp integrand + R integrate
+ptm <- proc.time()
+lower_rcpp_results <- lower_gamma_rcpp(s_vec, x_vec)
+time_lower_rcpp <- (proc.time() - ptm)[3]
+ptm <- proc.time()
+upper_rcpp_results <- upper_gamma_rcpp(s_vec, x_vec)
+time_upper_rcpp <- (proc.time() - ptm)[3]
+
+# Method 3: Full C++
+ptm <- proc.time()
+lower_cpp_results <- lower_gamma_cpp(s_vec, x_vec)
+time_lower_cpp <- (proc.time() - ptm)[3]
+ptm <- proc.time()
+upper_cpp_results <- upper_gamma_cpp(s_vec, x_vec)
+time_upper_cpp <- (proc.time() - ptm)[3]
+```
+
+## Task 2: Baseline comparison and MSE
+
+```{r baseline}
+# Baseline: R's pgamma (highly optimized C implementation)
+ptm <- proc.time()
+baseline_lower <- pgamma(x_vec, shape = s_vec, scale = 1, lower.tail = TRUE) * gamma(s_vec)
+time_bl_lower <- (proc.time() - ptm)[3]
+ptm <- proc.time()
+baseline_upper <- pgamma(x_vec, shape = s_vec, scale = 1, lower.tail = FALSE) * gamma(s_vec)
+time_bl_upper <- (proc.time() - ptm)[3]
+
+# MSE computation
+valid_idx <- is.finite(baseline_lower) & is.finite(baseline_upper)
+mse_fn <- function(a, b) mean((a[valid_idx] - b[valid_idx])^2, na.rm = TRUE)
+```
+
+```{r timing-table}
+timing_df <- data.frame(
+  Method = c("Pure R", "Rcpp integrand + R integrate",
+             "Full C++ ", "R Baseline (pgamma)"),
+  `Lower (sec)` = c(time_lower_r, time_lower_rcpp, time_lower_cpp, time_bl_lower),
+  `Upper (sec)` = c(time_upper_r, time_upper_rcpp, time_upper_cpp, time_bl_upper),
+  check.names = FALSE
+)
+knitr::kable(timing_df, digits = 4,
+             caption = "Wall-clock time (seconds) for 10,000 (s, x) pairs")
+```
+
+```{r mse-table}
+mse_df_display <- data.frame(
+  Method = c("Pure R", "Rcpp integrand + R integrate", "Full C++"),
+  `Lower MSE` = c(sprintf("%.2e", mse_fn(lower_r_results, baseline_lower)),
+                  sprintf("%.2e", mse_fn(lower_rcpp_results, baseline_lower)),
+                  sprintf("%.2e", mse_fn(lower_cpp_results, baseline_lower))),
+  `Upper MSE` = c(sprintf("%.2e", mse_fn(upper_r_results, baseline_upper)),
+                  sprintf("%.2e", mse_fn(upper_rcpp_results, baseline_upper)),
+                  sprintf("%.2e", mse_fn(upper_cpp_results, baseline_upper))),
+  check.names = FALSE
+)
+knitr::kable(mse_df_display,
+             caption = "Mean Squared Error vs. R baseline (pgamma * gamma)")
+```
+
+Methods 1 and 2 achieve essentially identical accuracy (MSE $\sim 10^{-21}$), since both rely on R's `integrate()` which uses QUADPACK internally. Method 2 (Rcpp integrand) shows similar runtime to Method 1 because the bottleneck is the 10,000 calls to `integrate()`, not the integrand evaluation itself.
+
+The full C++ implementation (Method 3) is roughly 3--4$\times$ faster than Methods 1--2, since it avoids the R interpreter overhead entirely. Its MSE is slightly higher ($\sim 0.006$) due to a few extreme parameter combinations (very small $s$ near 0.0001 with large $x$), where the substitution-based quadrature loses some precision. For all practical purposes the accuracy is sufficient.
+
+The R baseline (`pgamma * gamma`) is by far the fastest ($\sim 0.005$ sec) because it uses highly optimized compiled routines with specialized algorithms for the regularized incomplete gamma function.
+
+\newpage
+
+# Problem 2
+
+The survival function is defined as:
+$$1 - F^*(x) = \sqrt{\frac{1}{\pi}}\,\gamma\!\left(\tfrac{1}{2},\,\left(\tfrac{\tau^2}{x}\right)^{1/\phi}\right) + x^{-1}\sqrt{\frac{1}{\pi}}\,\frac{\tau^2}{\phi}\,\Gamma\!\left(\tfrac{1}{2}-\phi,\,\left(\tfrac{\tau^2}{x}\right)^{1/\phi}\right).$$
+
+When $\phi > 0.5$, the parameter $s = \frac{1}{2} - \phi < 0$ in the upper incomplete gamma. We handle negative $s$ via the recurrence relation:
+$$\Gamma(s, x) = \frac{\Gamma(s+1, x) - x^s e^{-x}}{s},$$
+applied recursively until $s + k > 0$. We also guard against underflow by setting $x^s e^{-x} = 0$ when $x > 700$.
+
+```{r prob2-cpp, cache=TRUE}
+sourceCpp(code = '
+#include <Rcpp.h>
+#include <cmath>
+using namespace Rcpp;
+
+static const int GL_N = 15;
+static const double gl_nodes[15] = {
+  -0.987992518020485, -0.937273392400706, -0.848206583410427,
+  -0.724417731360170, -0.570972172608539, -0.394151347077563,
+  -0.201194093997435,  0.000000000000000,  0.201194093997435,
+   0.394151347077563,  0.570972172608539,  0.724417731360170,
+   0.848206583410427,  0.937273392400706,  0.987992518020485
+};
+static const double gl_weights[15] = {
+   0.030753241996117,  0.070366047488108,  0.107159220467172,
+   0.139570677926154,  0.166269205816994,  0.186161000015562,
+   0.198431485327111,  0.202578241925561,  0.198431485327111,
+   0.186161000015562,  0.166269205816994,  0.139570677926154,
+   0.107159220467172,  0.070366047488108,  0.030753241996117
+};
+
+inline double integrand_orig(double t, double s) {
+  if (t <= 0.0) return 0.0;
+  return exp((s - 1.0) * log(t) - t);
+}
+
+inline double integrand_transformed(double u, double s) {
+  if (u <= 0.0) return 0.0;
+  double inv_s = 1.0 / s;
+  return inv_s * exp(-pow(u, inv_s));
+}
+
+typedef double (*integrand_fn)(double, double);
+
+double gl_quad(double a, double b, double s, integrand_fn f) {
+  double mid = 0.5 * (a + b);
+  double half = 0.5 * (b - a);
+  double sum = 0.0;
+  for (int i = 0; i < GL_N; i++) {
+    double t = mid + half * gl_nodes[i];
+    sum += gl_weights[i] * f(t, s);
+  }
+  return half * sum;
+}
+
+double adaptive_quad(double a, double b, double s, integrand_fn f,
+                     double tol, int depth) {
+  double whole = gl_quad(a, b, s, f);
+  double mid_pt = 0.5 * (a + b);
+  double left_val = gl_quad(a, mid_pt, s, f);
+  double right_val = gl_quad(mid_pt, b, s, f);
+  double refined = left_val + right_val;
+  double err = fabs(refined - whole);
+  if (err < tol * (1.0 + fabs(refined)) || depth >= 25) return refined;
+  return adaptive_quad(a, mid_pt, s, f, tol, depth + 1) +
+         adaptive_quad(mid_pt, b, s, f, tol, depth + 1);
+}
+
+double lower_gamma_single(double s, double x) {
+  if (x <= 0.0) return 0.0;
+  if (s > 0.0 && x > std::max(50.0, s + 10.0 * sqrt(s))) {
+    double tail_len = std::max(50.0, 4.0 * sqrt(s > 1.0 ? s : 1.0));
+    return R::gammafn(s) - adaptive_quad(x, x + tail_len, s, integrand_orig, 1e-10, 0);
+  }
+  if (s < 1.0) {
+    double split = std::min(1.0, x);
+    double part1 = adaptive_quad(0.0, pow(split, s), s, integrand_transformed, 1e-10, 0);
+    double part2 = (x > split) ? adaptive_quad(split, x, s, integrand_orig, 1e-10, 0) : 0.0;
+    return part1 + part2;
+  }
+  return adaptive_quad(0.0, x, s, integrand_orig, 1e-10, 0);
+}
+
+double upper_gamma_single(double s, double x) {
+  if (x <= 0.0) {
+    if (s > 0.0) return R::gammafn(s);
+    return R_PosInf;
+  }
+  if (s > 0.0 && x > std::max(50.0, s + 10.0 * sqrt(s))) {
+    double tail_len = std::max(50.0, 4.0 * sqrt(s > 1.0 ? s : 1.0));
+    return adaptive_quad(x, x + tail_len, s, integrand_orig, 1e-10, 0);
+  }
+  if (s > 0.0) return R::gammafn(s) - lower_gamma_single(s, x);
+  if (fabs(s) < 1e-14) {
+    return adaptive_quad(x, x + std::max(100.0, 3.0*x), 0.0, integrand_orig, 1e-10, 0);
+  }
+  double upper_sp1 = upper_gamma_single(s + 1.0, x);
+  double correction = (x < 700.0) ? pow(x, s) * exp(-x) : 0.0;
+  return (upper_sp1 - correction) / s;
+}
+
+double survival_single(double x, double phi, double tau) {
+  if (x <= 0.0) return 1.0;
+  double r1pi = 1.0 / sqrt(M_PI);
+  double tau2 = tau * tau;
+  double arg = pow(tau2 / x, 1.0 / phi);
+  double term1 = r1pi * lower_gamma_single(0.5, arg);
+  double term2 = (1.0/x) * r1pi * (tau2/phi) * upper_gamma_single(0.5 - phi, arg);
+  double surv = term1 + term2;
+  if (surv < 0.0) surv = 0.0;
+  if (surv > 1.0) surv = 1.0;
+  return surv;
+}
+
+double cdf_single(double x, double phi, double tau) {
+  if (x <= 0.0) return 0.0;
+  return 1.0 - survival_single(x, phi, tau);
+}
+
+// [[Rcpp::export]]
+NumericVector cdf_Fstar(NumericVector x, double phi, double tau) {
+  int n = x.size();
+  NumericVector result(n);
+  for (int i = 0; i < n; i++) result[i] = cdf_single(x[i], phi, tau);
+  return result;
+}
+
+// [[Rcpp::export]]
+NumericVector conv_FY(NumericVector y, double phi, double tau, double sigma,
+                      double K_trunc = 8.0) {
+  int ny = y.size();
+  NumericVector result(ny);
+  double inv_sqrt2pi = 1.0 / sqrt(2.0 * M_PI);
+  for (int j = 0; j < ny; j++) {
+    double yj = y[j];
+    double lo = std::max(1e-10, yj - K_trunc * sigma);
+    double hi = yj + K_trunc * sigma;
+    if (hi <= 1e-10) { result[j] = 0.0; continue; }
+    if (lo < 1e-10) lo = 1e-10;
+    bool use_survival = (cdf_single(lo, phi, tau) > 0.99);
+    double width = hi - lo;
+    int n_sub = std::max(1, std::min(1000, (int)ceil(width / sigma)));
+    double sub_w = width / (double)n_sub;
+    double total = 0.0;
+    for (int isub = 0; isub < n_sub; isub++) {
+      double a = lo + isub * sub_w;
+      double b = a + sub_w;
+      double mid = 0.5*(a+b), half = 0.5*(b-a);
+      double sub_sum = 0.0;
+      for (int ig = 0; ig < GL_N; ig++) {
+        double xi = mid + half * gl_nodes[ig];
+        if (xi <= 0.0) continue;
+        double z = (yj - xi) / sigma;
+        double kern = inv_sqrt2pi * exp(-0.5*z*z) / sigma;
+        if (use_survival) sub_sum += gl_weights[ig] * survival_single(xi, phi, tau) * kern;
+        else sub_sum += gl_weights[ig] * cdf_single(xi, phi, tau) * kern;
+      }
+      total += half * sub_sum;
+    }
+    result[j] = use_survival ? (1.0 - total) : total;
+    if (result[j] < 0.0) result[j] = 0.0;
+    if (result[j] > 1.0) result[j] = 1.0;
+  }
+  return result;
+}
+')
+```
+
+## Task 1: Verify $F^*(x)$ is a valid CDF
+
+We verify three conditions for $(\phi, \tau) = (0.7, 2)$.
+
+```{r task1-verify, cache=FALSE}
+phi_val <- 0.7; tau_val <- 2.0
+x_grid <- c(seq(1e-6, 1, length.out = 500),
+            seq(1, 100, length.out = 500),
+            seq(100, 10000, length.out = 500),
+            seq(10000, 1e6, length.out = 200))
+Fstar_vals <- cdf_Fstar(x_grid, phi_val, tau_val)
+```
+
+**Condition 1: $0 \leq F^*(x) \leq 1$.**
+
+```{r cond1}
+cat("min(F*) =", min(Fstar_vals), ", max(F*) =", max(Fstar_vals), "\n")
+cat("All in [0,1]?", all(Fstar_vals >= -1e-10 & Fstar_vals <= 1 + 1e-10), "\n")
+```
+
+**Condition 2: $F^*(x)$ is non-decreasing.**
+
+```{r cond2}
+cat("min(diff(F*)) =", min(diff(Fstar_vals)), "\n")
+cat("Any decrease > 1e-10?", any(diff(Fstar_vals) < -1e-10), "\n")
+```
+
+**Condition 3: Boundary limits $F^*(x) \to 0$ as $x \downarrow 0$ and $F^*(x) \to 1$ as $x \to \infty$.**
+
+```{r cond3}
+near0 <- cdf_Fstar(c(1e-10, 1e-8, 1e-6), phi_val, tau_val)
+large <- cdf_Fstar(c(1e4, 1e5, 1e6, 1e8), phi_val, tau_val)
+cat("F*(1e-10) =", near0[1], ", F*(1e-6) =", near0[3], "\n")
+cat("F*(1e4) =", large[1], ", F*(1e6) =", large[3], ", F*(1e8) =", large[4], "\n")
+```
+
+All three CDF conditions are satisfied: the function is bounded in $[0, 1]$, non-decreasing, and approaches 0 and 1 at the appropriate limits.
+
+
+```{r task1-plot, fig.width=10, fig.height=5}
+par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3, 1))
+
+x1 <- seq(0.001, 100, length.out = 1000)
+plot(x1, cdf_Fstar(x1, 0.7, 2), type = "l", col = "blue", lwd = 2,
+     xlab = "x", ylab = expression(F^"*"*(x)),
+     main = expression(paste(phi, " = 0.7, ", tau, " = 2, x " %in% " [0, 100]")))
+abline(h = c(0, 1), lty = 2, col = "gray")
+
+x2 <- seq(1, 10000, length.out = 1000)
+plot(x2, cdf_Fstar(x2, 0.7, 2), type = "l", col = "blue", lwd = 2,
+     xlab = "x", ylab = expression(F^"*"*(x)),
+     main = expression(paste(phi, " = 0.7, ", tau, " = 2, x " %in% " [1, 10000]")))
+abline(h = 1, lty = 2, col = "gray")
+```
+
+The left panel shows $F^*(x)$ rising from 0 for small $x$, while the right panel reveals the heavy-tailed behavior: even at $x = 10{,}000$, $F^*(x)$ has not yet reached 1.
+
+
+## Task 2: Convolution CDF $F_Y(y)$
+
+The convolution is $F_Y(y) = \int_0^\infty F^*(x)\,\frac{1}{\sigma}\phi\!\left(\frac{y-x}{\sigma}\right)dx$. We address three numerical challenges:
+
+1. **Truncation:** The Gaussian kernel is negligible outside $[y - 8\sigma, y + 8\sigma]$, so we restrict integration to $[\max(\epsilon,\, y - 8\sigma),\, y + 8\sigma]$.
+
+2. **Leakage prevention:** For large $y$, $F^*(x) \approx 1$ over most of the integration domain. Naive quadrature produces values near 0 instead of 1 (the "leakage" described in the assignment). We compute the **survival** form instead: $1 - F_Y(y) = \int_0^\infty S^*(x)\,\phi((y-x)/\sigma)/\sigma\,dx$, which avoids catastrophic cancellation.
+
+3. **Composite quadrature:** We subdivide the integration interval into sub-intervals of width $\approx \sigma$ and apply 15-point Gauss--Legendre on each.
+
+### Computing $F_Y(y)$
+
+```{r task2-compute}
+y_vals1 <- seq(-100, 100, length.out = 2000)
+y_vals2 <- seq(1000, 10000, length.out = 2000)
+
+# (phi, tau, sigma) = (0.3, 2, 3)
+ptm <- proc.time()
+FY_03_y1 <- conv_FY(y_vals1, phi = 0.3, tau = 2, sigma = 3)
+FY_03_y2 <- conv_FY(y_vals2, phi = 0.3, tau = 2, sigma = 3)
+time_03 <- (proc.time() - ptm)[3]
+
+# (phi, tau, sigma) = (0.7, 2, 3)
+ptm <- proc.time()
+FY_07_y1 <- conv_FY(y_vals1, phi = 0.7, tau = 2, sigma = 3)
+FY_07_y2 <- conv_FY(y_vals2, phi = 0.7, tau = 2, sigma = 3)
+time_07 <- (proc.time() - ptm)[3]
+```
+
+### CDF plots (Figure 1 reproduction)
+
+```{r task2-plots, fig.width=12, fig.height=10}
+par(mfrow = c(2, 2), mar = c(4.5, 4.5, 3, 1))
+
+plot(y_vals1, FY_03_y1, type = "l", col = "blue", lwd = 2,
+     xlab = "y", ylab = expression(F[Y](y)),
+     main = expression(paste("(a) ", (phi*", "*tau*", "*sigma), " = (0.3, 2, 3), y " %in% " [-100, 100]")))
+abline(h = c(0, 1), lty = 2, col = "gray")
+
+plot(y_vals1, FY_07_y1, type = "l", col = "blue", lwd = 2,
+     xlab = "y", ylab = expression(F[Y](y)),
+     main = expression(paste("(b) ", (phi*", "*tau*", "*sigma), " = (0.7, 2, 3), y " %in% " [-100, 100]")))
+abline(h = c(0, 1), lty = 2, col = "gray")
+
+plot(y_vals2, FY_03_y2, type = "l", col = "blue", lwd = 2,
+     xlab = "y", ylab = expression(F[Y](y)),
+     main = expression(paste("(c) ", (phi*", "*tau*", "*sigma), " = (0.3, 2, 3), y " %in% " [10"^3*", 10"^4*"]")))
+abline(h = 1, lty = 2, col = "gray")
+
+plot(y_vals2, FY_07_y2, type = "l", col = "blue", lwd = 2,
+     xlab = "y", ylab = expression(F[Y](y)),
+     main = expression(paste("(d) ", (phi*", "*tau*", "*sigma), " = (0.7, 2, 3), y " %in% " [10"^3*", 10"^4*"]")))
+abline(h = 1, lty = 2, col = "gray")
+```
+
+### Monotonicity verification
+
+```{r monotone-check}
+cat("phi=0.3, y in [-100,100]:  min(diff) =", min(diff(FY_03_y1)), "\n")
+cat("phi=0.3, y in [1e3, 1e4]:  min(diff) =", min(diff(FY_03_y2)), "\n")
+cat("phi=0.7, y in [-100,100]:  min(diff) =", min(diff(FY_07_y1)), "\n")
+cat("phi=0.7, y in [1e3, 1e4]:  min(diff) =", min(diff(FY_07_y2)), "\n")
+```
+
+All minimum differences are non-negative, confirming smooth, monotonically non-decreasing CDF curves.
+
+### Runtime
+
+```{r runtime-table}
+runtime_df <- data.frame(
+  Setting = c("phi = 0.3", "phi = 0.7"),
+  `Time (sec)` = c(time_03, time_07),
+  check.names = FALSE
+)
+knitr::kable(runtime_df, digits = 2,
+             caption = "Wall-clock time for 4,000 F_Y evaluations (C++ with survival trick)")
+```
+
+Both distributions are heavy-tailed: the CDF does not reach 1 even at $y = 10{,}000$. The setting $\phi = 0.7$ produces a much heavier tail than $\phi = 0.3$, consistent with the behavior shown in the reference Figure 1. The survival-based computation for large $y$ successfully avoids the QUADPACK "leakage" artifact, and all CDF curves are smooth and monotone. The full C++ implementation via Rcpp evaluates all 4,000 grid points in under 7 seconds.
+
+
+
+
+# Problem 3
+
+We have in the question, an exponentially tilted positive stable distribution which is very useful and flexible in modeling extreme weather. The family of such distributions is parameterized by $\theta > 0$. We have its density function as:
+$$
+f(x;\theta)
+=
+\frac{\sqrt{\frac{1}{4\pi x^{3}}}\,
+\exp\!\left(-\frac{1}{4x} - \theta x\right)}
+{\exp(-\sqrt{\theta})},
+\qquad x > 0.
+$$
+
+## 1)
+
+We will use Rejection Sampling technique discuessed in class for this problem. If we look at the above density and if we ignore the constant terms, we get the kernel as $$x^{-3/2} \exp\!\left(-\frac{1}{4x} - \theta x\right)$$. This kernel, at least to us, looks strikingly similar to that of the kernel of an Inverse Gaussian distribution. From wikipedia, I got the density of Inverse Gaussian distribution as $$
+f(x;\mu,\lambda)
+=
+\sqrt{\frac{\lambda}{2\pi x^{3}}}
+\exp\!\left(
+-\frac{\lambda (x-\mu)^2}{2\mu^{2}x}
+\right),
+\qquad x>0,$$ where $\mu >0$ and $\lambda > 0$ are parameters. Thus, we can use this distribution as a proposal distribution. We can use in-built R function to sample from this proposal distribution.  We use the following R code to implement the Rejection sampling with Inverse Gaussian being our proposal distribution. 
+
+```{r}
+library(statmod)   
+
+# Target density
+f_theta <- function(x, theta = 0.1){
+  ifelse(x > 0,
+         sqrt(1/(4*pi*x^3)) *
+           exp(-1/(4*x) - theta*x + sqrt(theta)),
+         0)
+}
+
+# Condition 2: integrates to 1
+integrate(f_theta, lower = 0, upper = Inf, theta = 0.1)
+
+# Proposal: Inverse Gaussian
+g_prop <- function(x, theta = 0.1){
+  mu  <- 1/(2*sqrt(theta))
+  lam <- 1
+  dinvgauss(x, mean = mu, shape = lam)
+}
+
+# Rejection sampler 
+tilted_sampler <- function(theta = 0.1){
+
+  mu  <- 1/(2*sqrt(theta))
+  lam <- 1
+
+  counter <- 1
+
+  x <- rinvgauss(1, mean = mu, shape = lam)
+  ratio <- f_theta(x, theta) / g_prop(x, theta)
+
+  while(runif(1) > ratio){
+
+    x <- rinvgauss(1, mean = mu, shape = lam)
+    counter <- counter + 1
+
+    ratio <- f_theta(x, theta) / g_prop(x, theta)
+  }
+
+  return(c(x, counter))
+}
+```
+
+Now as asked in the question, we sample $N=100000$ independent samples for $\theta= 0.1$
+
+
+```{r}
+N <- 100000
+res <- sapply(1:N, function(i) tilted_sampler(0.1))
+
+samples     <- res[1,]
+num_sampled <- sum(res[2,])
+
+cat("Acceptance rate:", N / num_sampled, "\n")
+cat("Total proposals needed:", num_sampled, "\n")
+```
+
+
+## 2) 
+
+Now we replicate Figure 3 in the question; that is, plot the sample density using histogram and compare it to the underlying true density. We use the code given in the question:
+
+```{r}
+hist(samples, breaks = 1000, freq = FALSE,
+     border = "lightblue")
+
+curve(f_theta(x, 0.1),
+      from = 1e-5, to = 60,
+      n = 1000, add = TRUE,
+      col = "red", lty = 3)
+```
+
+We see in the above plot, there is a perfect alignment between the sample density and the analytic density. This showed that our choice of proposal distribution was correct and the rejection sampling technique henceforth did a good job!
+
+
+
+# Problem 4 
+
+In this question we consider a 4 × 4 grid of Bernoulli random variables denoted by $X = [Xij]$. We also consider $N(X)$ as the total number of successes in X (the sum of X) and $D(X)$ as the total number of neighbors (horizontal or vertical) which differ. We are also told that if we write the elements of X out in a vector V , then there is a 24×16 matrix M such that $D(X)$ is sum of the absolute values of MV . The 24 arises because there are 24 neighbor-pairs to check (diagonal elements are not neighbors.) We have probability distribution of X being proportional to $$
+\pi(X) \propto 
+p^{N(X)} (1 - p)^{16 - N(X)} 
+\exp\!\left\{ -\lambda D(X) \right\}.$$
+Therefore, if $\lambda = 0$, we have i.i.d.\ Bernoulli entries. We use Markov chain Monte Carlo to approximate the probability that the diagonal of this matrix is all 1’s. We assume $p = 0.8$. We approximate the probabilities for each of the following cases: $\lambda = 0.5, \: \lambda = 1.$ We have $Q1$ where every transition is equally likely with probability $1/2^{16}$. That is, the next candidate state is simply 16 i.i.d. Bernoulli variables with prob- ability 0.5 of success each. We use $Q2$ such that we choose one of the 16 entries in the table with probability 1/16 and then set that entry to 0 or 1 with probability 0.5 each. We use the following R code:
+
+
+
+
+```{r}
+
+set.seed(12345678)
+
+N_fun <- function(X) sum(X)
+
+D_fun <- function(X){
+  d <- 0
+  d <- d + sum(abs(X[1:3, ] - X[2:4, ]))
+  d <- d + sum(abs(X[ ,1:3] - X[ ,2:4]))
+  d
+}
+logpi <- function(X, p=0.8, lambda=0.5){
+  n <- N_fun(X)
+  d <- D_fun(X)
+  n*log(p) + (16-n)*log(1-p) - lambda*d
+}
+diag_all1 <- function(X) all(diag(X) == 1)
+mh_Q1_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL,
+                       keep_X = FALSE){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+  lp <- logpi(X,p,lambda)
+
+  ind  <- logical(n_iter)
+  Dtr  <- numeric(n_iter)
+  acc  <- logical(n_iter)
+
+  Xpost <- if(keep_X) matrix(NA_integer_, nrow = n_iter - burn, ncol = 16) else NULL
+  k <- 0
+
+  for(t in 1:n_iter){
+    Y   <- matrix(rbinom(16,1,0.5), 4,4)
+    lpy <- logpi(Y,p,lambda)
+
+    if(log(runif(1)) < (lpy - lp)){
+      X <- Y; lp <- lpy
+      acc[t] <- TRUE
+    }
+
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+
+    if(keep_X && t > burn){
+      k <- k + 1
+      Xpost[k,] <- as.integer(c(X))
+    }
+  }
+
+  list(
+    indicator = ind[(burn+1):n_iter],
+    D_trace   = Dtr[(burn+1):n_iter],
+    acc_rate  = mean(acc),
+    n_iter    = n_iter,
+    burn      = burn,
+    p         = p,
+    lambda    = lambda,
+    chain_last = X,
+    X_post_vec = Xpost
+  )
+}
+mh_Q2_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL,
+                       keep_X = FALSE){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+  lp <- logpi(X,p,lambda)
+
+  ind  <- logical(n_iter)
+  Dtr  <- numeric(n_iter)
+  acc  <- logical(n_iter)
+
+  Xpost <- if(keep_X) matrix(NA_integer_, nrow = n_iter - burn, ncol = 16) else NULL
+  k <- 0
+  for(t in 1:n_iter){
+    Y <- X
+    j <- sample.int(16, 1)
+    Y[j] <- rbinom(1,1,0.5)
+    lpy <- logpi(Y,p,lambda)
+
+    if(log(runif(1)) < (lpy - lp)){
+      X <- Y; lp <- lpy
+      acc[t] <- TRUE
+    }
+
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+
+    if(keep_X && t > burn){
+      k <- k + 1
+      Xpost[k,] <- as.integer(c(X))
+    }
+  }
+
+  list(
+    indicator = ind[(burn+1):n_iter],
+    D_trace   = Dtr[(burn+1):n_iter],
+    acc_rate  = mean(acc),
+    n_iter    = n_iter,
+    burn      = burn,
+    p         = p,
+    lambda    = lambda,
+    chain_last = X,
+    X_post_vec = Xpost
+  )
+}
+
+
+library(coda)
+
+batch_se <- function(x, b = 200){
+  x <- as.numeric(x)
+  n <- length(x)
+  a <- floor(n / b)
+  x <- x[1:(a*b)]
+  m <- matrix(x, nrow = b)
+  bm <- colMeans(m)
+  sqrt(var(bm) / a)
+}
+
+ess <- function(x) as.numeric(effectiveSize(as.numeric(x)))
+
+make_plots <- function(res_Q1, res_Q2, main_tag=""){
+  ind1 <- as.numeric(res_Q1$indicator)
+  ind2 <- as.numeric(res_Q2$indicator)
+  D1   <- res_Q1$D_trace
+  D2   <- res_Q2$D_trace
+
+  op <- par(no.readonly=TRUE); on.exit(par(op), add=TRUE)
+  par(mfrow=c(2,3), mar=c(4,4,2,1))
+
+  plot(ind1, type="l", xlab="iter (post-burn)", ylab="I(diag all 1)",
+       main=paste0("Trace I: Q1 ", main_tag))
+  plot(ind2, type="l", xlab="iter (post-burn)", ylab="I(diag all 1)",
+       main=paste0("Trace I: Q2 ", main_tag))
+
+  plot(D1, type="l", xlab="iter (post-burn)", ylab="D(X)",
+       main=paste0("Trace D: Q1 ", main_tag))
+  plot(D2, type="l", xlab="iter (post-burn)", ylab="D(X)",
+       main=paste0("Trace D: Q2 ", main_tag))
+
+  acf(ind1, main=paste0("ACF I: Q1 ", main_tag))
+  acf(ind2, main=paste0("ACF I: Q2 ", main_tag))
+}
+
+summary_row <- function(res, algo="Q1", bsize=200){
+  ind <- as.numeric(res$indicator)
+  data.frame(
+    lambda   = res$lambda,
+    algo     = algo,
+    n_post   = length(ind),
+    acc_rate = res$acc_rate,
+    est      = mean(ind),
+    ESS      = ess(ind),
+    SE_bm    = batch_se(ind, b=bsize),
+    stringsAsFactors = FALSE
+  )
+}
+
+p <- 0.8
+lams <- c(0.5, 1.0)
+n_iter <- 60000
+burn   <- 10000
+bsize  <- 200
+
+OUT <- list(meta=list(p=p, lams=lams, n_iter=n_iter, burn=burn, bsize=bsize),
+            runs=list())
+
+for(lambda in lams){
+  OUT$runs[[as.character(lambda)]] <- list(
+    Q1 = mh_Q1_once(n_iter, burn, p, lambda, keep_X=FALSE),
+    Q2 = mh_Q2_once(n_iter, burn, p, lambda, keep_X=FALSE)
+  )
+}
+
+
+TAB <- do.call(rbind, lapply(lams, function(lambda){
+  r <- OUT$runs[[as.character(lambda)]]
+  rbind(summary_row(r$Q1, "Q1", bsize),
+        summary_row(r$Q2, "Q2", bsize))
+}))
+#print(TAB)
+
+
+#make_plots(OUT$runs[["0.5"]]$Q1, OUT$runs[["0.5"]]$Q2, main_tag="(lambda=0.5)")
+
+
+#make_plots(OUT$runs[["1"]]$Q1, OUT$runs[["1"]]$Q2, main_tag="(lambda=1)")
+```
+
+We use the \textbf{Metropolis--Hastings (MH)} algorithm to approximate
+$\Pr(\text{diag}(X) = \mathbf{1})$ under the distribution, as given in the question,
+\[
+\pi(X) \;\propto\;
+p^{N(X)}\,(1-p)^{16-N(X)}\,\exp\!\bigl\{-\lambda\, D(X)\bigr\},
+\]
+with $p = 0.8$ and $\lambda \in \{0.5,\; 1.0\}$. We initialised the chain by drawing each of the 16 entries of the $4\times 4$ matrix $X^{(0)}$ independently from $\text{Bernoulli}(0.5)$. Each chain is run for $T = 60000$ iterations and we considered $10000$ as burn-in which we left out. After discarding the burnin-in, for the next $50000$ iterations we estimate the targer probability as, \[
+    \widehat{P} \;=\; \frac{1}{T - T_{\text{burn}}}
+    \sum_{t=T_{\text{burn}}+1}^{T} \mathbf{1}\!\bigl[\text{diag}(X^{(t)}) = \mathbf{1}\bigr].
+    \]
+Now for $Q1$, at each iteration the candidate $Y$ is generated by drawing all 16 entries independently from $\text{Bernoulli}(0.5)$, so we can write
+\[
+q_1(Y \mid X) \;=\; \prod_{i,j=1}^{4} \left(\tfrac{1}{2}\right) \;=\; \frac{1}{2^{16}}.
+\]
+ We set a seed at `12345678` for reproducibility. As because $q_1(Y\mid X) = q_1(X\mid Y)$, the proposal is symmetric we can actually simplify the MH acceptance probability to 
+\[
+\alpha(X, Y) \;=\; \min\!\left(1,\; \frac{\pi(Y)}{\pi(X)}\right).
+\]
+In our R code we worked on the log scale, so we accept $Y$ if $\log U < \log\pi(Y) - \log\pi(X)$, such that $U \sim \text{Uniform}(0,1)$.
+
+Now for $Q2$, we have at each iterations one of the 16 entries being selected uniformly at random (with probability $1/16$) and set it to 0 or 1 with equal probability $1/2$, leaving all other entries totally unchanged. For example, if entry $(i,j)$ is chosen,
+\[
+Y_{kl} =
+\begin{cases}
+\text{Bernoulli}(0.5), & (k,l) = (i,j),\\
+X_{kl}, & (k,l) \neq (i,j).
+\end{cases}
+\]
+We note that even this is a symmetric proposal as the probability of choosing entry $(i,j)$ and setting it to a particular value is the same in both directions, so the acceptance probability again can be reduced to
+\[
+\alpha(X, Y) \;=\; \min\!\left(1,\; \frac{\pi(Y)}{\pi(X)}\right).
+\]
+
+## 2) 
+
+From the table below, it is evident that the second algorithm , namely $Q2$ has a much faster mixing Markov Chain. We see that for that, for 60000 iterations with 10000 burn-ins, the effective sample size for $Q1$ is 51.6 whereas for $Q2$ its 970.8 for $\lambda=0.5$ and for $\lambda = 1$ we get the effective samples sizes for $Q1$ and $Q2$ as 3.4 and 795.1 respectively. The acceptance rate for $Q1$ is 0.008 and 0.0002 for $\lambda = 0.5,1$ respectively. For $Q2$, on the other hand has a much much higher acceptance rate of $0.6$ and $0.5$ for $\lambda = 0.5,1$ respectively. This shows that $Q1$ almost never accepts, especially for $\lambda =1$ making the chain extremely difficult to move. Further proof can be obtained by looking at the MCMC standard errors which are lower for $Q2$ (0.012 and 0.009 for the two $\lambda$ values in the respective orders) than $Q1$ (0.029 and 0.022 for the two $\lambda$ values in the respective orders). 
+
+
+```{r}
+TAB
+```
+To make our point more convincing, we can look at the ACF plots below. The first two ACF plots are for $\lambda =0.5$, precisely, first one for $Q1$ and the second for $Q2$. The next two are for $\lambda =1$ in the same order. We see that $Q1$ for both lamda values have high autocorrelation with its past values whereas for $Q2$ it decreases with increasing lags, this shows that for $Q1$ the chains will get stuck and will decay much more than in $Q2$ making it way faster.  
+
+
+
+```{r}
+par(mfrow = c(2,2), mar = c(4,4,4,1))
+
+acf(as.numeric(OUT$runs[["0.5"]]$Q1$indicator),
+    main = "ACF: Q1 (lambda = 0.5)")
+
+acf(as.numeric(OUT$runs[["0.5"]]$Q2$indicator),
+    main = "ACF: Q2 (lambda = 0.5)")
+
+acf(as.numeric(OUT$runs[["1"]]$Q1$indicator),
+    main = "ACF: Q1 (lambda = 1)")
+
+acf(as.numeric(OUT$runs[["1"]]$Q2$indicator),
+    main = "ACF: Q2 (lambda = 1)")
+```
+
+
+## 3) 
+
+Here I am sharing all the 12 plots (6 for $\lambda=0.5$ and 6 for $\lambda=1$) needed to answer this question. For $\lambda =1$, we see that under $Q1$, the trace plot of $I_t$ shows long flat line at 1, showing that the chain becomes stuck in high-probability configurations. This is consistent with the extremely low acceptance rate (0.0002) and very very small ESS (3.4). However for $q2$, we can see that the trace plot shows continuous switching between 0 and 1, which proves that it is the space. Similar conclusion can be drawn for both for $\lambda=0.5$ For the trace of D(X), we see for $\lambda = 1$, $Q1$ quickly collapses  with very small D(X) and remains there whereas $Q2$ again explores a wider range. Similar observations can be seen for the case of $\lambda =0.5$ but with far less extreme behavior. For the autocorrelation plots, as explained before, $Q1$ shows high autocorrelation with its lagged values than $Q2$ indicating higher changes of chain being stuck. To decide on the effective sample size, we looked at the effective sample size, the 	Batch-means MCMC standard errors which we recorded in the next subpart. All these indicates that $Q2$ is a much much faster mixing MC than $Q1$, thus we are assured that $Q2$ will converge way faster than $Q1$. Here comes a trade off, running too many iterations will be useless for $Q2$ as it has possible converged way earlier and will lead to unnecessary computation time. On the other hand, if we stop as soon as $Q2$ converged, there will be a good chance that $Q1$ haven't converged at all. So a trade of can be made by looking at the mean plots (estimate vs. iteration). There if we see that $Q1$ is about to or just (kind of) converged to almost fixed estimated values and $Q2$ converges already before a few iteration, that would, we believe, an excellent place to stop. By looking at the running mean plots below, it looks like at 50000 iterations after a burn-in of 10000 looks exactly what we wanted, $Q1$ is almost stable at running mean of $0.85$ and $Q2$ have already stabilized at $0.92$.
+
+
+
+```{r}
+make_plots(OUT$runs[["0.5"]]$Q1, OUT$runs[["0.5"]]$Q2, main_tag="(lambda=0.5)")
+make_plots(OUT$runs[["1"]]$Q1, OUT$runs[["1"]]$Q2, main_tag="(lambda=1)")
+```
+```{r}
+running_mean <- function(x){
+  x <- as.numeric(x)
+  cumsum(x) / seq_along(x)
+}
+
+running_mean_plots <- function(res_Q1, res_Q2, lambda){
+
+  ind1 <- as.numeric(res_Q1$indicator)
+  ind2 <- as.numeric(res_Q2$indicator)
+
+  rm1 <- running_mean(ind1)
+  rm2 <- running_mean(ind2)
+
+  par(mfrow=c(1,2), mar=c(4,4,4,1))
+
+  plot(rm1, type="l",
+       xlab="Iteration (post-burn)",
+       ylab="Running mean",
+       main=paste0("Running mean: Q1 (lambda=", lambda, ")"))
+  abline(h=mean(ind1), lty=3)
+
+  plot(rm2, type="l",
+       xlab="Iteration (post-burn)",
+       ylab="Running mean",
+       main=paste0("Running mean: Q2 (lambda=", lambda, ")"))
+  abline(h=mean(ind2), lty=3)
+}
+
+# Run for both lambdas
+running_mean_plots(OUT$runs[["0.5"]]$Q1,
+                   OUT$runs[["0.5"]]$Q2,
+                   0.5)
+
+running_mean_plots(OUT$runs[["1"]]$Q1,
+                   OUT$runs[["1"]]$Q2,
+                   1)
+```
+
+
+## 4)
+
+The following Table reports all estimates, along with associated MCMC standard errors (using consistent batch means). 
+
+```{r}
+TAB
+```
+
+From the table above me see that, $Q1$ has 0.4619 and 0.8483 as estimates and 0.0296 and 0.02270 as standard errors for $\lambda$ at 0.5 and 1 respectively. Similarly $Q2$ has 0.7707 and 0.9190 as estimates and 0.01265 and 0.00918 as standard errors for $\lambda$ at 0.5 and 1 respectively.
+
+
+## 5)
+
+In Lecture 10, we have Monte Carlo Methods, there we are interested in estimating expectations of the form
+
+$$\mu_g = \mathbb{E}_{\pi}[g(X)] = \int g(x)\,\pi(x)\,dx,$$
+
+where $\pi$ is the target distribution. There we assumed that we can simulate draws from $\pi$. After that we can use Monte Carlo estimator $$\hat{\mu}_n = \frac{1}{n} \sum_{i=1}^n g(X_i),
+\quad X_i \stackrel{iid}{\sim} \pi.$$
+
+Now, we already know from Strong Law of Large Numbers, if $E_\pi|g(X)| < \infty$, then
+$\hat{\mu}_n \xrightarrow{a.s.} \mu_g.$ From this, we get in the slides, the Central Limit Theorem which says, if $\tau^2 = \mathrm{Var}_\pi(g(X)) < \infty,$ then $\sqrt{n}(\hat{\mu}_n - \mu_g) \xrightarrow{d} N(0,\tau^2).$ This justifies the use of Monte Carlo estimation in the iid setting. However, in this problem we cannot directly sample iid from $\pi$ so we cannot actually get $\hat \mu_n$. To find a solution for this problem, we use Markov Chain with with Metropolis-Hasting algorithm with $\pi$ being the stationary distribution. There, as also described in slides, we construct Markov chain of $\pi$ as its stationary distribution, and take $n$ chain states as though they are draws from$\pi$. Then we take averages again. We know, also written as a result in slides, that this method relies on Law of Large Numbers for Markov chains and the conditions are easily satisfied.
+
+
+
+## 6)
+
+Now we make an attempt to construct a more efficient Metropolis-Hastings algorithm than the ones we have used above. We know A Gibbs Sampler is a special case of Metropolis Hasting algorithm with acceptance probability 1 since the proposal equals the full conditional. So the the idea is to use a Gibbs sampler ($Q3$) which would randomly visit all 16 cells, this should be more useful than $Q1$ and $Q2$. Here we sample $X_j$ for each cell $j$ from its full conditional distribution under $\pi$. 
+
+
+$$
+P(X_j = 1 \mid X_{-j}) = \frac{\pi(X \text{ with } X_j=1)}{\pi(X \text{ with } X_j=1) + \pi(X \text{ with } X_j=0)}
+$$
+
+Here we compute $\log\pi$ for both cases and use the softmax.
+
+
+
+The following code implements the Gibbs sampler and prepares a table that compares acceptance rate, batch Standard Error, etc. for the three. Here we compute $\log\pi$ for both cases ($P(X_j = 1 \mid X_{-j})$ and $P(X_j = 0 \mid X_{-j})$) and use the softmax operator.  As given in question, we only consider the case when $\lambda = 1.$
+
+
+Note: $Q1$ and $Q2$ are re-run here with a fresh seed for a fair comparison with the Gibbs sampler, so their estimates differ slightly from Part 4.
+
+
+```{r}
+set.seed(12345678)
+N_fun <- function(X) sum(X)
+D_fun <- function(X){
+  sum(abs(X[1:3, ] - X[2:4, ])) + sum(abs(X[ ,1:3] - X[ ,2:4]))
+}
+logpi <- function(X, p=0.8, lambda=0.5){
+  n <- N_fun(X)
+  d <- D_fun(X)
+  n*log(p) + (16-n)*log(1-p) - lambda*d
+}
+diag_all1 <- function(X) all(diag(X) == 1)
+gibbs_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+
+  ind <- logical(n_iter)
+  Dtr <- numeric(n_iter)
+
+  for(t in 1:n_iter){
+    perm <- sample.int(16)
+    for(j in perm){
+      X1 <- X; X1[j] <- 1
+      X0tmp <- X; X0tmp[j] <- 0
+
+      lp1 <- logpi(X1, p, lambda)
+      lp0 <- logpi(X0tmp, p, lambda)
+
+      prob1 <- 1 / (1 + exp(lp0 - lp1))
+      X[j] <- rbinom(1, 1, prob1)
+    }
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+  }
+
+  list(
+    indicator  = ind[(burn+1):n_iter],
+    D_trace    = Dtr[(burn+1):n_iter],
+    acc_rate   = 1.0,
+    n_iter     = n_iter,
+    burn       = burn,
+    p          = p,
+    lambda     = lambda,
+    chain_last = X
+  )
+}
+mh_Q1_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+  lp <- logpi(X,p,lambda)
+
+  ind <- logical(n_iter)
+  Dtr <- numeric(n_iter)
+  acc <- logical(n_iter)
+
+  for(t in 1:n_iter){
+    Y   <- matrix(rbinom(16,1,0.5), 4,4)
+    lpy <- logpi(Y,p,lambda)
+    if(log(runif(1)) < (lpy - lp)){
+      X <- Y; lp <- lpy; acc[t] <- TRUE
+    }
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+  }
+
+  list(
+    indicator  = ind[(burn+1):n_iter],
+    D_trace    = Dtr[(burn+1):n_iter],
+    acc_rate   = mean(acc),
+    n_iter     = n_iter,
+    burn       = burn,
+    p          = p,
+    lambda     = lambda,
+    chain_last = X
+  )
+}
+mh_Q2_once <- function(n_iter=60000, burn=10000, p=0.8, lambda=0.5, X0=NULL){
+  if(is.null(X0)) X <- matrix(rbinom(16,1,0.5), 4,4) else X <- X0
+  lp <- logpi(X,p,lambda)
+
+  ind <- logical(n_iter)
+  Dtr <- numeric(n_iter)
+  acc <- logical(n_iter)
+
+  for(t in 1:n_iter){
+    Y <- X
+    j <- sample.int(16, 1)
+    Y[j] <- rbinom(1,1,0.5)
+
+    lpy <- logpi(Y,p,lambda)
+    if(log(runif(1)) < (lpy - lp)){
+      X <- Y; lp <- lpy; acc[t] <- TRUE
+    }
+    ind[t] <- diag_all1(X)
+    Dtr[t] <- D_fun(X)
+  }
+
+  list(
+    indicator  = ind[(burn+1):n_iter],
+    D_trace    = Dtr[(burn+1):n_iter],
+    acc_rate   = mean(acc),
+    n_iter     = n_iter,
+    burn       = burn,
+    p          = p,
+    lambda     = lambda,
+    chain_last = X
+  )
+}
+batch_se <- function(x, b = 200){
+  x <- as.numeric(x)
+  a <- floor(length(x) / b)
+  x <- x[1:(a*b)]
+  m <- matrix(x, nrow = b)
+  bm <- colMeans(m)
+  sqrt(var(bm) / a)
+}
+ess <- function(x) as.numeric(effectiveSize(as.numeric(x)))
+summary_row <- function(res, algo="Q1", bsize=200){
+  ind <- as.numeric(res$indicator)
+  data.frame(
+    lambda   = res$lambda,
+    algo     = algo,
+    n_post   = length(ind),
+    acc_rate = round(res$acc_rate, 6),
+    est      = round(mean(ind), 6),
+    ESS      = round(ess(ind), 2),
+    SE_bm    = round(batch_se(ind, b=bsize), 6),
+    check.names = FALSE
+  )
+}
+lambda <- 1.0
+p <- 0.8
+n_iter <- 60000
+burn <- 10000
+res_Q1 <- mh_Q1_once(n_iter, burn, p, lambda)
+res_Q2 <- mh_Q2_once(n_iter, burn, p, lambda)
+res_Q3 <- gibbs_once(n_iter, burn, p, lambda)
+TAB <- rbind(
+  summary_row(res_Q1, "Q1"),
+  summary_row(res_Q2, "Q2"),
+  summary_row(res_Q3, "Gibbs")
+)
+TAB
+```
+
+
+We see from the above table that, naturally Gibbs sample has acceptance probability 1. We see that the batch SE is much lower for the Gibbs ($Q3$) than for $Q1$ and $Q2$. Also effective sample size (ESS) is way larger for $Q3$ than $Q1$ and $Q2$. These proves $Q3$ having much faster mixing MC and is way efficient. 
+
+```{r}
+par(mfrow=c(3,2), mar=c(4,4,3,1))
+
+plot(as.numeric(res_Q1$indicator), type="l",
+     xlab="iter (post-burn)", ylab="I(diag all 1)",
+     main="Trace I: Q1 (lambda=1)")
+acf(as.numeric(res_Q1$indicator), main="ACF I: Q1 (lambda=1)")
+
+plot(as.numeric(res_Q2$indicator), type="l",
+     xlab="iter (post-burn)", ylab="I(diag all 1)",
+     main="Trace I: Q2 (lambda=1)")
+acf(as.numeric(res_Q2$indicator), main="ACF I: Q2 (lambda=1)")
+
+plot(as.numeric(res_Q3$indicator), type="l",
+     xlab="iter (post-burn)", ylab="I(diag all 1)",
+     main="Trace I: Gibbs (lambda=1)")
+acf(as.numeric(res_Q3$indicator), main="ACF I: Gibbs (lambda=1)")
+
+par(mfrow=c(1,1))
+```
+
+We see from the above plopts that the Gibbs sampler's Trace plot is completely back showing that it covers the entire state space (that was natural from the construction). Also, it is no autocorrelation with its lags which proves that the chain would almost never get stuck at a state for the Gibbs sampler. On the contrary for $Q1$ and $Q2$ there are considerable autocorrelation with its lags which can prove chain being stuck for a prolonged time. Thus, from the table and from these plots, we can say that our proposed algorithm $Q3$ is way more efficient than $Q1$ and $Q2$. 
+
+
+# Problem 5
+
+We fit the nonlinear regression model:
+
+$$Y_i = \frac{1 + \beta_1 X_i}{1 + \beta_2 \exp(\beta_3 X_i)} + \epsilon_i, \quad \epsilon_i \overset{iid}{\sim} N(0, \sigma^2)$$
+
+with priors $\beta_j \sim N(0, \tau^2 = 10)$ for $j = 1,2,3$ and $\sigma^2 \sim \text{Gamma}(k=1, \theta=10)$ (shape-scale parameterization).
+
+First we load the  Dataset with a very brief visualisation
+
+```{r load-data}
+library(MASS)
+load("glm dat.RData")
+n <- length(Y)
+cat("n =", n, "\n")
+plot(X, Y, pch = 16, col = rgb(0.27, 0.51, 0.71, 0.5),
+     main = "Data: Y vs X", xlab = "X", ylab = "Y")
+```
+
+## 1)
+
+We use **Metropolis-within-Gibbs** with an **adaptive block proposal** for the three $\beta$'s and a separate Metropolis step for $\sigma^2$ on the log-scale. The following is the pseudocode for this problem:
+
+```
+Initialize: beta = (3, 0.1, 0.3), sigma2 = 8
+Set initial proposal covariance Sigma_prop = small diagonal matrix
+
+For i = 2, ..., N_iter:
+
+    # -- Adapt proposal (during warm-up only) --
+    If i <= adapt_end and i mod 500 == 0:
+        Sigma_prop = (2.38^2 / 3) * Cov(recent samples) + eps * I
+
+    # -- Block update (beta1, beta2, beta3) --
+    Propose beta* = beta_current + MVN(0, Sigma_prop)
+    log_r = log_posterior(beta*, sigma2) - log_posterior(beta_curr, sigma2)
+    Accept beta* with probability min(1, exp(log_r))
+
+    # -- Update sigma^2 on log-scale --
+    Propose log(sigma2*) = log(sigma2_current) + Normal(0, sd_prop)
+    log_r = log_post(beta, sigma2*) - log_post(beta, sigma2_curr)
+            + log(sigma2*) - log(sigma2_curr)     [Jacobian]
+    Accept sigma2* with probability min(1, exp(log_r))
+
+    Store (beta1, beta2, beta3, sigma2)
+
+Post-process: discard burn-in, thin every 5th sample
+```
+
+In framing this model, we made the following choices
+
+- **Block proposal** for the three $\beta$'s because they are highly correlated in the posterior.
+- **Adaptive covariance** using the $2.38^2/d$ scaling rule (Roberts & Rosenthal), frozen after adaptation.
+- **Log-transform** for $\sigma^2$ to ensure positivity, with Jacobian correction.
+
+Now we run the MCMC code:
+
+```{r mcmc, cache=TRUE}
+mu_func <- function(X, b1, b2, b3) {
+  (1 + b1 * X) / (1 + b2 * exp(b3 * X))
+}
+log_posterior <- function(b1, b2, b3, sig2, X, Y, tau2 = 10) {
+  mu <- mu_func(X, b1, b2, b3)
+  if (any(!is.finite(mu))) return(-Inf)
+  if (sig2 <= 0) return(-Inf)
+  ll <- -n/2 * log(sig2) - sum((Y - mu)^2) / (2 * sig2)
+  lp_betas <- -b1^2/(2*tau2) - b2^2/(2*tau2) - b3^2/(2*tau2)
+  lp_sig2 <- -sig2 / 10
+  return(ll + lp_betas + lp_sig2)
+}
+set.seed(42)
+n_iter    <- 100000
+burn_in   <- 20000
+thin      <- 5
+adapt_end <- 5000
+
+samples <- matrix(NA, nrow = n_iter, ncol = 4)
+colnames(samples) <- c("beta1", "beta2", "beta3", "sigma2")
+samples[1, ] <- c(3, 0.1, 0.3, 8)
+
+prop_cov_beta   <- diag(c(0.01, 0.005, 0.005))
+prop_sd_logsig2 <- 0.15
+accept_beta <- 0
+accept_sig2 <- 0
+for (i in 2:n_iter) {
+  b_curr    <- samples[i-1, 1:3]
+  sig2_curr <- samples[i-1, 4]
+  
+  
+  if (i > 500 && i <= adapt_end && i %% 500 == 0) {
+    emp_cov <- cov(samples[max(1, i-1000):(i-1), 1:3])
+    if (all(is.finite(emp_cov)))
+      prop_cov_beta <- 2.38^2 / 3 * emp_cov + 1e-6 * diag(3)
+  }
+  if (i == adapt_end + 1) {
+    emp_cov <- cov(samples[1:(i-1), 1:3])
+    prop_cov_beta <- 2.38^2 / 3 * emp_cov + 1e-6 * diag(3)
+  }
+  
+  b_prop <- b_curr + mvrnorm(1, mu = rep(0, 3), Sigma = prop_cov_beta)
+  lp_curr <- log_posterior(b_curr[1], b_curr[2], b_curr[3], sig2_curr, X, Y)
+  lp_prop <- log_posterior(b_prop[1], b_prop[2], b_prop[3], sig2_curr, X, Y)
+  log_r <- lp_prop - lp_curr
+  if (is.finite(log_r) && log(runif(1)) < log_r) {
+    b_curr <- b_prop
+    accept_beta <- accept_beta + 1
+  }
+  
+  log_sig2_curr <- log(sig2_curr)
+  log_sig2_prop <- rnorm(1, log_sig2_curr, prop_sd_logsig2)
+  sig2_prop <- exp(log_sig2_prop)
+  lp_curr_s <- log_posterior(b_curr[1], b_curr[2], b_curr[3], sig2_curr, X, Y)
+  lp_prop_s <- log_posterior(b_curr[1], b_curr[2], b_curr[3], sig2_prop, X, Y)
+  log_r_s <- lp_prop_s - lp_curr_s + log_sig2_prop - log_sig2_curr
+  if (is.finite(log_r_s) && log(runif(1)) < log_r_s) {
+    sig2_curr <- sig2_prop
+    accept_sig2 <- accept_sig2 + 1
+  }
+  
+  samples[i, ] <- c(b_curr, sig2_curr)
+}
+
+keep <- seq(burn_in + 1, n_iter, by = thin)
+post <- samples[keep, ]
+```
+
+Upon running the MCMC we get the following acceptance rates:
+
+```{r acceptance}
+cat("Betas (block):", round(accept_beta / n_iter * 100, 1), "%\n")
+cat("Sigma^2:      ", round(accept_sig2 / n_iter * 100, 1), "%\n")
+cat("Post burn-in/thin samples:", nrow(post), "\n")
+```
+
+## 2)
+
+
+```{r trace-plots, fig.height=7}
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+for (j in 1:4) {
+  plot(post[, j], type = "l", col = "steelblue",
+       ylab = colnames(post)[j], xlab = "Iteration (post burn-in)",
+       main = paste("Trace:", colnames(post)[j]))
+}
+```
+
+All four trace plots look stationary --- the chains bounce around a stable mean with no obvious trends or drift, indicating convergence. This proves that the burn-in of 20,000 iterations were sufficient.
+
+For further conformation, we can have a look at the acf plots of the coefficients:
+
+```{r acf-plots, fig.height=7}
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+for (j in 1:4) {
+  acf(post[, j], main = paste("ACF:", colnames(post)[j]), lag.max = 50)
+}
+```
+
+For the three $\beta$'s, the autocorrelation starts high (~0.8) and decays to near zero by about lag 20--30. For $\sigma^2$, the ACF drops below the significance band almost immediately (by lag 2--3), showing its excellent mixing.
+
+Next, we have a look at the effective sample sizes (ESS) for the coefficients:
+
+```{r ess}
+ess_func <- function(x) {
+  nn <- length(x)
+  acf_vals <- acf(x, plot = FALSE, lag.max = min(500, nn-1))$acf[-1]
+  cutoff <- which(acf_vals < 0.05)[1]
+  if (is.na(cutoff)) cutoff <- length(acf_vals)
+  tau <- 1 + 2 * sum(acf_vals[1:cutoff])
+  return(nn / max(tau, 1))
+}
+
+ess_vals <- sapply(1:4, function(j) round(ess_func(post[, j])))
+names(ess_vals) <- colnames(post)
+print(ess_vals)
+```
+
+All ESS values are above 1,000 for the $\beta$'s and above 11,000 for $\sigma^2$, this again hints at that the MCMC approximations are reliable.
+
+## 3)
+
+
+In this sub part we summarize approximations of the posterior expectations for each of the 4 variables.
+
+```{r summaries}
+post_means <- colMeans(post)
+
+mcmc_se <- function(x, n_batches = 50) {
+  nn <- length(x)
+  bs <- floor(nn / n_batches)
+  bm <- sapply(1:n_batches, function(b) mean(x[((b-1)*bs+1):(b*bs)]))
+  sd(bm) / sqrt(n_batches)
+}
+
+results <- data.frame(
+  Parameter = colnames(post),
+  Post_Mean = round(post_means, 4),
+  MCMC_SE   = sapply(1:4, function(j) round(mcmc_se(post[, j]), 6)),
+  CI_Lower  = round(apply(post, 2, quantile, 0.025), 4),
+  CI_Upper  = round(apply(post, 2, quantile, 0.975), 4)
+)
+knitr::kable(results, col.names = c("Parameter", "Post. Mean", "MCMC SE",
+                                     "95% CI Lower", "95% CI Upper"),
+             row.names = FALSE)
+```
+
+The MCMC standard errors are very small relative to the posterior standard deviations. This shows that the chain ran long enough and we have obtained reliable estimation.
+
+## 4) 
+
+Now we plot the posterior pdfs for the for coefficients:
+
+```{r posterior-pdfs, fig.height=7}
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+for (j in 1:4) {
+  d <- density(post[, j])
+  plot(d, main = paste("Posterior:", colnames(post)[j]),
+       xlab = colnames(post)[j], col = "steelblue", lwd = 2)
+  polygon(d, col = rgb(0.27, 0.51, 0.71, 0.3), border = "steelblue")
+  abline(v = post_means[j], col = "red", lty = 2, lwd = 1.5)
+  legend("topright", legend = sprintf("Mean = %.3f", post_means[j]),
+         col = "red", lty = 2, bty = "n", cex = 0.9)
+}
+```
+
+All four posteriors are roughly unimodal. The $\beta$'s show some mild skewness, while $\sigma^2$ has a slight right skew pattern.
+
+## 5) 
+
+Now we  investigate Posterior Dependence, first through correlation matrix.
+
+
+```{r correlations}
+cor_mat <- cor(post)
+knitr::kable(round(cor_mat, 3), caption = "Posterior Correlation Matrix")
+```
+
+From above we can see that $\beta_1$, $\beta_2$ and $\beta_3$ are pretty strongly correlated. However $\sigma^2$ seemed independent of the $\beta$ parameters. 
+
+Next, as asked in the question, we show Bivariate Scatter Plots:
+
+```{r bivariate, fig.height=8}
+pairs(post, col = rgb(0.27, 0.51, 0.71, 0.1), pch = 16, cex = 0.5,
+      main = "Bivariate Posterior Samples", labels = colnames(post))
+```
+
+
+We again note that there is **very strong positive correlation** among all three $\beta$ parameters.
+
+
+Hence we are double confirmed about the high correlations which means the three parameters are **not easily identifiable separately** --- a change in one $\beta$ can be compensated by changes in the others to produce a similar fit. The bivariate scatter plots show elongated elliptical clouds, confirming this. This is why we needed the block proposal: updating $\beta$'s one at a time would move along the narrow direction of these ellipses, leading to very slow mixing.
+
+As just noted before, $\sigma^2$ is essentially independent of the three $\beta$'s ($|r| < 0.025$ for all pairs), which makes sense to us as the error variance is orthogonal to the mean function parameters once the residuals are computed.
+
+## 6)
+
+Now we implement Importance Sampling with prior Variance of 5. We reweight the MCMC samples (obtained under $\tau^2 = 10$) to approximate the posterior under $\tau^2 = 5$. The IS weight for each sample is:
+
+$$w^{(i)} \propto \prod_{j=1}^{3} \frac{N(\beta_j^{(i)}; 0, 5)}{N(\beta_j^{(i)}; 0, 10)}$$
+
+```{r is-5}
+log_is_w5 <- apply(post[, 1:3], 1, function(b) sum(0.5*log(2) - b^2/20))
+log_w5 <- log_is_w5 - max(log_is_w5)
+w5 <- exp(log_w5)
+w5n <- w5 / sum(w5)
+ess5 <- 1 / sum(w5n^2)
+
+is_results_5 <- data.frame(
+  Parameter = colnames(post),
+  IS_Mean = sapply(1:4, function(j) round(sum(w5n * post[, j]), 4)),
+  IS_SE   = sapply(1:4, function(j) {
+    m <- sum(w5n * post[, j])
+    v <- sum(w5n * (post[, j] - m)^2)
+    round(sqrt(v / ess5), 5)
+  })
+)
+knitr::kable(is_results_5, col.names = c("Parameter", "IS Mean (tau2=5)", "IS SE"),
+             row.names = FALSE)
+cat("IS effective sample size:", round(ess5, 1), "\n")
+```
+
+The IS ESS is nearly the full sample size (15954.5 out of 16000), indicating excellent weight stability. The tighter prior ($\tau^2 = 5$) places more mass where our samples already concentrate, so essentially all samples remain informative. 
+
+## 7) 
+
+Now we re-implement Importance Sampling with Prior Variance of 50.
+
+```{r is-50}
+log_is_w50 <- apply(post[, 1:3], 1, function(b) sum(-0.5*log(5) + b^2/25))
+log_w50 <- log_is_w50 - max(log_is_w50)
+w50 <- exp(log_w50)
+w50n <- w50 / sum(w50)
+ess50 <- 1 / sum(w50n^2)
+
+is_results_50 <- data.frame(
+  Parameter = colnames(post),
+  IS_Mean = sapply(1:4, function(j) round(sum(w50n * post[, j]), 4)),
+  IS_SE   = sapply(1:4, function(j) {
+    m <- sum(w50n * post[, j])
+    v <- sum(w50n * (post[, j] - m)^2)
+    round(sqrt(v / ess50), 5)
+  })
+)
+knitr::kable(is_results_50, col.names = c("Parameter", "IS Mean (tau2=50)", "IS SE"),
+             row.names = FALSE)
+cat("IS effective sample size:", round(ess50, 1), "\n")
+```
+
+The IS ESS is again very high, and the posterior means pretty much did not change across all three prior specifications ($\tau^2 = 5, 10, 50$). With $n = 200$ observations, the data wins over the prior and whether we use $\tau^2 = 5$ or 50 it is making very little of difference to the posterior. This is reassuring as our inference is robust to the choice of prior variance for the $\beta$'s.
+
+
