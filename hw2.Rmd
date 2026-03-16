@@ -7,8 +7,8 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
-                      fig.align = "center", fig.width = 10, fig.height = 6,
-                      crop = NULL)
+                      fig.align = "center", fig.width = 6, fig.height = 4,
+                      out.width = "90%", crop = NULL)
 ```
 
 
@@ -18,9 +18,9 @@ We implement the lower and upper incomplete gamma functions:
 $$\gamma(s, x) = \int_0^x t^{s-1} e^{-t}\,dt, \qquad \Gamma(s, x) = \int_x^\infty t^{s-1} e^{-t}\,dt.$$
 Both are improper integrals. The lower integral has an integrable singularity at $t = 0$ when $s < 1$ (since $t^{s-1} \to \infty$), and the upper integral extends to infinity.
 
-## Part (1): Integrand and integration in R
+## 1)
 
-We define the integrand $f(t; s) = t^{s-1} e^{-t}$ in R and use `integrate()` (which calls QUADPACK's adaptive quadrature internally) for numerical integration. The functions are vectorized over $(s, x)$ pairs using `mapply()`.
+We define the integrand $f(t; s) = t^{s-1} e^{-t}$ in R and use `integrate()` for numerical integration. The functions are vectorized over $(s, x)$ pairs using `mapply()`.
 
 ```{r part1-r}
 gamma_integrand <- function(t, s) {
@@ -56,7 +56,7 @@ upper_gamma_r <- function(s, x) {
 
 For the lower integral, `integrate()` handles the singularity at $t = 0$ via its internal adaptive subdivision. For the upper integral, R's `integrate()` supports `Inf` as an upper limit through an internal variable transformation. If this fails, we fall back to $\Gamma(s, x) = \Gamma(s) - \gamma(s, x)$.
 
-## Part (2): Integrand in C++, integration in R
+## 2)
 
 We define the same integrand in C++ via `Rcpp::cppFunction()`. The integrand uses log-space computation $\exp\bigl((s-1)\log t - t\bigr)$ instead of $t^{s-1} e^{-t}$ for improved numerical stability when $s$ is very small. The integration is still performed by R's `integrate()`.
 
@@ -106,7 +106,7 @@ upper_gamma_rcpp <- function(s, x) {
 }
 ```
 
-## Part (3) — Bonus: Both integrand and integration in C++
+## 3)
 
 We implement adaptive Gauss--Legendre 15-point quadrature entirely in C++ via `Rcpp::sourceCpp()`.
 
@@ -295,8 +295,6 @@ valid_idx <- is.finite(baseline_lower) & is.finite(baseline_upper)
 mse_fn <- function(a, b) mean((a[valid_idx] - b[valid_idx])^2, na.rm = TRUE)
 ```
 
-### Timing summary
-
 ```{r timing-table}
 timing_df <- data.frame(
   Method = c("Pure R", "Rcpp integrand + R integrate",
@@ -308,8 +306,6 @@ timing_df <- data.frame(
 knitr::kable(timing_df, digits = 4,
              caption = "Wall-clock time (seconds) for 10,000 (s, x) pairs")
 ```
-
-### MSE summary
 
 ```{r mse-table}
 mse_df_display <- data.frame(
@@ -326,8 +322,6 @@ knitr::kable(mse_df_display,
              caption = "Mean Squared Error vs. R baseline (pgamma * gamma)")
 ```
 
-### Discussion
-
 Methods 1 and 2 achieve essentially identical accuracy (MSE $\sim 10^{-21}$), since both rely on R's `integrate()` which uses QUADPACK internally. Method 2 (Rcpp integrand) shows similar runtime to Method 1 because the bottleneck is the 10,000 calls to `integrate()`, not the integrand evaluation itself.
 
 The full C++ implementation (Method 3) is roughly 3--4$\times$ faster than Methods 1--2, since it avoids the R interpreter overhead entirely. Its MSE is slightly higher ($\sim 0.006$) due to a few extreme parameter combinations (very small $s$ near 0.0001 with large $x$), where the substitution-based quadrature loses some precision. For all practical purposes the accuracy is sufficient.
@@ -337,8 +331,6 @@ The R baseline (`pgamma * gamma`) is by far the fastest ($\sim 0.005$ sec) becau
 \newpage
 
 # Problem 2
-
-## Setup
 
 The survival function is defined as:
 $$1 - F^*(x) = \sqrt{\frac{1}{\pi}}\,\gamma\!\left(\tfrac{1}{2},\,\left(\tfrac{\tau^2}{x}\right)^{1/\phi}\right) + x^{-1}\sqrt{\frac{1}{\pi}}\,\frac{\tau^2}{\phi}\,\Gamma\!\left(\tfrac{1}{2}-\phi,\,\left(\tfrac{\tau^2}{x}\right)^{1/\phi}\right).$$
@@ -565,8 +557,6 @@ The left panel shows $F^*(x)$ rising from 0 for small $x$, while the right panel
 
 
 ## Task 2: Convolution CDF $F_Y(y)$
-
-### Numerical strategy
 
 The convolution is $F_Y(y) = \int_0^\infty F^*(x)\,\frac{1}{\sigma}\phi\!\left(\frac{y-x}{\sigma}\right)dx$. We address three numerical challenges:
 
